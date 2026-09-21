@@ -1,0 +1,15 @@
+.DS_Store
+Thumbs.db
+*.log
+*.out
+*.test
+*.exe
+server
+coverage/
+dist/
+build/
+.env
+.env.*
+.idea/
+.vscode/
+.codegraph/

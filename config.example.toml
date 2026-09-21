@@ -1,0 +1,79 @@
+# Eino Supervisor Template local example.
+# Secrets belong in the environment or a credential provider, never in this file.
+
+[server]
+listen_addr = ":8080"
+read_timeout = "10s"
+write_timeout = "30s"
+idle_timeout = "60s"
+request_body_limit = 1048576
+sse_heartbeat = "15s"
+
+[server.middleware]
+recovery = true
+request_id = true
+cors = false
+rate_limit = false
+pprof = false
+prometheus = false
+
+[model]
+provider = "fake"
+name = "fake-model"
+base_url = ""
+api_key_env = "LLM_API_KEY"
+temperature = 0.2
+max_tokens = 1024
+timeout = "30s"
+
+[agent.supervisor]
+enabled = true
+implementation = "eino.chat_model_agent"
+prompt_file = "prompts/supervisor.md"
+allowed_workers = ["user_analysis"]
+max_steps = 8
+
+[agent.workers.user_analysis]
+enabled = true
+implementation = "fake.user_analysis"
+prompt_file = "prompts/user_analysis.md"
+allowed_tools = ["user_query", "simulated_outreach"]
+timeout = "20s"
+
+[tools.user_query]
+enabled = true
+implementation = "fake.user_query"
+endpoint = ""
+risk = "read_only"
+timeout = "5s"
+max_retries = 1
+
+[tools.simulated_outreach]
+enabled = true
+implementation = "fake.simulated_outreach"
+risk = "side_effect"
+requires_approval = true
+timeout = "5s"
+max_retries = 0
+
+[limits]
+max_plan_steps = 8
+max_tool_calls = 12
+max_retries = 2
+cost_budget = 1000
+
+[approval]
+timeout = "10m"
+idempotency_window = "24h"
+
+[checkpoint]
+retention = "24h"
+
+[observability]
+enabled = false
+endpoint = ""
+service_name = "eino-supervisor-template"
+insecure = false
+log_level = "info"
+trace_sample_rate = 0.1
+metrics_enabled = true
