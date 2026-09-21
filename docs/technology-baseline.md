@@ -77,6 +77,12 @@ infrastructure  -> domain/application contracts
 
 模板不依赖 go-porter 包，也不复制其业务 handler、认证、MySQL/Redis 默认依赖或业务配置。来自外部项目的直接代码或明显改写必须登记到 `docs/upstream-map.md`，并保留许可证信息。
 
+## Licensing
+
+- 本项目原创代码和文档采用根目录 [MIT License](../LICENSE)。
+- `go.mod` 中的第三方依赖仍受各自项目许可证约束，不因本项目采用 MIT 而改变。
+- Coze Studio 和 go-porter 当前仅作参考，没有复制或明显改写其代码；具体来源边界见 [`docs/upstream-map.md`](./upstream-map.md)。
+
 ## Change Procedure
 
 以下变更必须先更新本文件、Spec/Plan 或 ADR，并补充验证：

@@ -35,3 +35,7 @@ go run ./cmd/server/ -f ./config.example.toml
 3. [PLAN.md](./PLAN.md)：技术栈、配置边界、复用矩阵、实施阶段和验收标准。
 4. [PROGRESS.md](./PROGRESS.md)：当前事实快照。
 5. [specs/001-eino-supervisor-template/tasks.md](./specs/001-eino-supervisor-template/tasks.md)：可执行任务清单。
+
+## 许可证
+
+本项目原创代码和文档采用 [MIT License](./LICENSE)。第三方依赖和参考项目保留各自的许可证；来源和引入边界见 [docs/upstream-map.md](./docs/upstream-map.md)。
