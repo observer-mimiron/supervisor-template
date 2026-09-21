@@ -20,9 +20,9 @@ v1 不接持久化数据库，但提前固定 `ExecutionPlan`、`Checkpoint`、`
 
 `.specify/memory/constitution.md` 是唯一项目宪法；Spec Kit 的 specify、plan、tasks、implement、converge 负责变更流程和产物生成。不得再建立第二份宪法或让配置、Prompt 成为隐式规则来源。
 
-## R6：Gin 作为 Web 边界，参考 go-porter 的基础设施装配
+## R6：Gin 作为 Web 边界
 
-模板使用 Gin 承担 HTTP、SSE、middleware、健康检查和优雅关闭。参考 `/home/huang/workspace/go-porter` 的配置入口、ServiceContext 装配、middleware 组合和 server 生命周期；只移植机制，不复制其业务 handler、认证、MySQL/Redis 默认依赖，也不让模板依赖 go-porter 包。这样能复用已验证的 Go Web 习惯，同时保持模板独立和领域合同可测试。
+模板使用 Gin 承担 HTTP、SSE、middleware、健康检查和优雅关闭；配置入口、middleware 组合和 server 生命周期都由本项目的基础设施层负责。这样可以保持模板独立，并让领域合同保持可测试。
 
 ## R7：配置优先，但配置不能改变安全合同
 

@@ -2,9 +2,9 @@
 
 ## 1. 目标
 
-创建一个独立的 Go/Eino Agent 参考项目，采用经过调研的 DDD 分层原则，保留 `suanming-agent` 的 Supervisor/Manager 运行模式，为后续运营 Agent 提供可复制的最小骨架。Coze Studio 仅作为成熟开源实现的参考来源，不是本项目规范。
+创建一个独立的 Go/Eino Agent 参考模板，采用清晰的 DDD 分层原则，固定 Supervisor/Manager 运行模式，为后续运营 Agent 提供可复制的最小骨架。
 
-项目不承载命理业务，不复制完整 Coze 平台，不实现真实运营系统写入。
+项目不承载命理业务，不实现真实运营系统写入。
 
 当前状态以 [PROGRESS.md](./PROGRESS.md) 为准：M0-M2 fake 实现已完成，M3/M4 仍是后续阶段。目录职责和依赖方向以 [docs/architecture.md](./docs/architecture.md) 为准，实施任务以 [specs/001-eino-supervisor-template/tasks.md](./specs/001-eino-supervisor-template/tasks.md) 为准。设计纲领以 [.specify/memory/constitution.md](./.specify/memory/constitution.md) 为准：领域边界和类型契约优先于框架与配置；LLM 只提出经过校验的候选决策；所有副作用都经过策略、审批、幂等和审计；默认选择最小可运行实现，需求出现后再增加分布式和平台能力。具体技术选型和升级规则以 [docs/technology-baseline.md](./docs/technology-baseline.md) 为准。
 
@@ -25,15 +25,11 @@
 
 必须由代码固定的内容包括安全不变量、Schema 合同、状态转换、权限上限、Policy Gate、审批不可绕过规则、终态规则和状态所有权。配置不能创造不存在的实现、扩大权限、降低审批等级、绕过 Schema 或改变状态所有权。
 
-## 2. 参考基线
+## 2. 技术基线
 
-- Coze Studio：`/home/huang/workspace/suanming-agent/agent-architecture-references/coze-studio`
-- Coze 基线：`fefb05ff`
-- Coze 后端结构：`api/application/domain/infra/crossdomain`
-- Coze 许可证：Apache 2.0
+- 分层结构：`api/application/domain/infra/crossdomain`
 - 当前项目执行模式：`RouteAdvisor/Supervisor -> Policy Gate -> Manager -> bounded runner -> ToolRunner -> Event Projection`
 - Eino 能力：ChatModel、ChatModelAgent、Runner、Tool calling、Callback、interrupt/resume
-- go-porter：仅参考其配置加载、Gin middleware、健康检查、ServiceContext 装配和优雅关闭；模板不依赖其包，也不复制其业务 handler、认证、数据库或缓存默认实现。
 
 ## 3. 第一版范围
 
@@ -96,9 +92,8 @@ Supervisor 产出候选决策；Policy Gate 产出 `ApprovedRoute`；Manager 生
 - 日志、Trace、Callback 和成本记录模式。
 - ID 生成、错误分类和 Repository 接口模式。
 - Eino Runner、Tool calling、Callback 的适配方式。
-- go-porter 的 Gin Engine 初始化、middleware 组合、健康检查、配置快照和优雅关闭方式。
 
-移植时必须清理 Coze 内部包名、平台错误码和厂商模型。
+实现必须保持仓库命名、领域边界和公开合同稳定，不引入未注册的外部能力。
 
 ### 需要改写
 
@@ -111,7 +106,6 @@ Supervisor 产出候选决策；Policy Gate 产出 `ApprovedRoute`；Manager 生
 - LLM/model builder
 - Eino workflow/service 适配
 - 应用初始化和配置装配
-- go-porter 的业务模块、认证、MySQL/Redis 默认依赖和领域 handler
 
 ### 只作参考
 
@@ -119,7 +113,6 @@ Supervisor 产出候选决策；Policy Gate 产出 `ApprovedRoute`；Manager 生
 - 插件市场。
 - 完整 Workflow DSL 和节点运行时。
 - 生成的 IDL、ORM、DAL 和 API model。
-- Coze 专用云服务、图片服务和渠道连接器。
 
 ## 7. 核心合同
 
@@ -175,12 +168,9 @@ ApprovalRequest
 - 验收：每个扩展有需求、ADR、迁移/回退和合同测试；本项不是 M0 前置条件。
 
 
-## 9. 复用和来源记录
+## 9. 许可证
 
-未来如引入来自 Coze 的代码或明显改写，必须在对应实施任务中登记来源、提交、路径、改动和许可证；当前模板不复制外部业务代码，也不把 Coze、Dify 等平台作为运行依赖。
-
-```text
-若未来引入 Apache 许可来源的代码，保留其版权头并在 `docs/upstream-map.md` 登记来源；当前模板原创代码和文档采用 MIT。第三方依赖和许可证在引入依赖的任务中同步登记。
+本项目原创代码和文档采用根目录 [MIT License](./LICENSE)。`go.mod` 中的第三方依赖按各自的许可证使用。
 
 ## 10. 完成标准
 
@@ -193,6 +183,6 @@ ApprovalRequest
 5. 副作用动作不能绕过审批和幂等保护。
 6. checkpoint 恢复不会重复执行已完成步骤。
 7. SSE 只做事件投影，不做业务判断。
-8. Coze 来源和许可证可追溯。
+8. 架构、依赖和配置边界清晰可追溯。
 9. 本地合同测试、`go test ./...` 和真实 `/api/chat` smoke 通过。
 10. 通过配置文件或环境变量可以替换部署参数、模型、Prompt、能力开关和预算；安全合同仍由代码强制。

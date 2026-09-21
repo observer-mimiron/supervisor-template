@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/config"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/config"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
 func TestNewBuildsHealthyMemoryGraph(t *testing.T) {

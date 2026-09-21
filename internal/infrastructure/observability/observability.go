@@ -26,12 +26,12 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/application"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/config"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/application"
+	"github.com/observer-mimiron/supervisor-template/internal/config"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
 
-const instrumentationName = "github.com/observer-mimiron/suanming-agent/eino-supervisor-template"
+const instrumentationName = "github.com/observer-mimiron/supervisor-template"
 
 var callbackOnce sync.Once
 

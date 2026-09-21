@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/composition"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/config"
+	"github.com/observer-mimiron/supervisor-template/internal/composition"
+	"github.com/observer-mimiron/supervisor-template/internal/config"
 )
 
 func TestChatProjectsReadOnlyRunAsOrderedSSE(t *testing.T) {

@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/application"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/application/run"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/application"
+	"github.com/observer-mimiron/supervisor-template/internal/application/run"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
 // Request 是 POST /api/chat 的公开输入。

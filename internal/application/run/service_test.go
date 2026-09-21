@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/application"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/conversation"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/operation"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/infrastructure/checkpoint"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/infrastructure/eventbus"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/infrastructure/llm"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/infrastructure/persistence"
-	toolinfra "github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/infrastructure/tool"
+	"github.com/observer-mimiron/supervisor-template/internal/application"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/operation"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/checkpoint"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/eventbus"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/llm"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/persistence"
+	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
 
 func newTestService() (*Service, *toolinfra.FakeRegistry) {

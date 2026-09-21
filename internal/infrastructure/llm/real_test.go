@@ -11,8 +11,8 @@ import (
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/config"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/config"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
 type fixedChatModel struct {

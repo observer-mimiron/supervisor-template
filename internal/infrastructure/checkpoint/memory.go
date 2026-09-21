@@ -7,7 +7,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
 
 // MemoryStore 保存每个 run 的最新 checkpoint。

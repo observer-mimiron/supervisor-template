@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/infrastructure/mcp"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/mcp"
 )
 
 // Registry 是按实现 ID 分派的 ToolExecutor。

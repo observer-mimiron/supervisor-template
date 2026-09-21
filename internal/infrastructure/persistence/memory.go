@@ -7,9 +7,9 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/approval"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/approval"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
 // MemoryRepository 保存单进程内的请求和计划快照。

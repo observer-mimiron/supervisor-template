@@ -3,8 +3,8 @@ package agent
 import (
 	"testing"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/operation"
-	domaintool "github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/tool"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/operation"
+	domaintool "github.com/observer-mimiron/supervisor-template/internal/domain/tool"
 )
 
 func TestPolicyGateRejectsUnknownTool(t *testing.T) {

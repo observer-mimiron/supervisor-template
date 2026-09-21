@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/operation"
-	domaintool "github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/tool"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/operation"
+	domaintool "github.com/observer-mimiron/supervisor-template/internal/domain/tool"
 )
 
 // PolicyGate 将候选决策限制到已注册 Worker 和 allow-listed Tool。

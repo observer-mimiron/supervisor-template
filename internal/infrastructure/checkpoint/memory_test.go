@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
 
 func TestMemoryStoreIncrementsVersion(t *testing.T) {

@@ -1,4 +1,4 @@
-module github.com/observer-mimiron/suanming-agent/eino-supervisor-template
+module github.com/observer-mimiron/supervisor-template
 
 go 1.25.0
 

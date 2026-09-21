@@ -10,7 +10,7 @@
 
 ## Summary
 
-实现一个可独立运行的 Go/Eino 运营 Agent 参考模板。模板只包含一个 Supervisor、一个有界 Worker、一个只读 Tool 和一个模拟副作用 Tool；通过确定性的 Policy Gate、审批、幂等、checkpoint 和事件投影，保留 `suanming-agent` 的运行模式，但不携带命理或真实运营业务。
+实现一个可独立运行的 Go/Eino 运营 Agent 参考模板。模板只包含一个 Supervisor、一个有界 Worker、一个只读 Tool 和一个模拟副作用 Tool；通过确定性的 Policy Gate、审批、幂等、checkpoint 和事件投影，验证有界执行和可靠恢复，不携带命理或真实运营业务。
 
 M0-M3 已完成并通过本地合同测试；M4 仍是后续阶段。实现顺序按 M0-M4 五个可独立验收模块拆分；每个模块完成后都能运行对应的零模型或 fake 合同测试，后续模块只能依赖前面已经通过的合同。目录和依赖方向以 [architecture.md](../../docs/architecture.md) 为唯一来源，当前状态以 [PROGRESS.md](../../PROGRESS.md) 为准，原子任务以 [tasks.md](./tasks.md) 为准。
 

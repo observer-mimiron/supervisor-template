@@ -7,8 +7,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
 // FakeSupervisor 根据用户消息生成稳定候选路由，不生成权限、审批结果或终态。

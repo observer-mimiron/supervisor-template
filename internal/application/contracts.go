@@ -6,9 +6,9 @@ package application
 import (
 	"context"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/approval"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/approval"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
 // Repository 是应用层需要的请求和计划存储合同。

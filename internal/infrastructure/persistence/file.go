@@ -14,9 +14,9 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/approval"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/approval"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
 const fileSchemaVersion = 1

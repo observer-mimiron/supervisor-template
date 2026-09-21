@@ -7,7 +7,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
 
 // EventType、RunEvent 和事件常量沿用领域合同，避免基础设施重新定义语义。

@@ -71,17 +71,14 @@ infrastructure  -> domain/application contracts
 
 配置不能创造不存在的实现、扩大权限、降低审批等级、绕过 Schema、改变状态所有权或关闭安全门禁。配置变更默认重启生效，v1 不实现热加载。
 
-## Reference Boundary
+## Implementation Boundary
 
-`/home/huang/workspace/go-porter` 只作为 Gin 基础设施参考，允许借鉴配置入口、ServiceContext 装配、middleware 组合、健康检查、配置快照和优雅关闭方式。
-
-模板不依赖 go-porter 包，也不复制其业务 handler、认证、MySQL/Redis 默认依赖或业务配置。来自外部项目的直接代码或明显改写必须登记到 `docs/upstream-map.md`，并保留许可证信息。
+基础设施只使用 `go.mod` 中声明并经过验证的组件。新增依赖必须说明用途、边界和验证方式；实现不能绕过既有的领域合同、Policy Gate 或状态所有权。
 
 ## Licensing
 
 - 本项目原创代码和文档采用根目录 [MIT License](../LICENSE)。
 - `go.mod` 中的第三方依赖仍受各自项目许可证约束，不因本项目采用 MIT 而改变。
-- Coze Studio 和 go-porter 当前仅作参考，没有复制或明显改写其代码；具体来源边界见 [`docs/upstream-map.md`](./upstream-map.md)。
 
 ## Change Procedure
 

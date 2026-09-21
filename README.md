@@ -5,7 +5,7 @@
 设计基线：
 
 - 参考成熟 Agent 平台的 DDD 分层：`api/application/domain/infra/crossdomain`
-- `suanming-agent` 的执行模式：`Supervisor -> Policy Gate -> Manager -> Worker -> Tool`
+- 固定执行模式：`Supervisor -> Policy Gate -> Manager -> Worker -> Tool`
 - Eino 的 `ChatModelAgent`、`Runner`、Tool calling、Callback 和 interrupt/resume
 
 当前事实快照见 [PROGRESS.md](./PROGRESS.md)，目录职责和固定运行链路见
@@ -38,4 +38,4 @@ go run ./cmd/server/ -f ./config.example.toml
 
 ## 许可证
 
-本项目原创代码和文档采用 [MIT License](./LICENSE)。第三方依赖和参考项目保留各自的许可证；来源和引入边界见 [docs/upstream-map.md](./docs/upstream-map.md)。
+本项目原创代码和文档采用 [MIT License](./LICENSE)。第三方依赖按各自的许可证使用。

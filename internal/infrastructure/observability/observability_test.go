@@ -15,9 +15,9 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/config"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/domain/agent"
-	"github.com/observer-mimiron/suanming-agent/eino-supervisor-template/internal/infrastructure/eventbus"
+	"github.com/observer-mimiron/supervisor-template/internal/config"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/eventbus"
 )
 
 func TestEventStoreEmitsOnlyStructuralRunAttributes(t *testing.T) {
