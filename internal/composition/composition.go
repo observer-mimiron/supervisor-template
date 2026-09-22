@@ -15,6 +15,7 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/operation"
+	authinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/auth"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/checkpoint"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/eventbus"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/llm"
@@ -26,15 +27,17 @@ import (
 
 // App 是进程级依赖图和启动健康状态。
 type App struct {
-	Config config.Config
-	Health application.HealthService
-	Run    *runapp.Service
-	Close  func(context.Context) error
+	Config        config.Config
+	Authenticator application.Authenticator
+	Health        application.HealthService
+	Run           *runapp.Service
+	Close         func(context.Context) error
 }
 
 // New 根据已校验配置创建依赖图，并选择内存/文件、fake/真实和 MCP 基础设施实现。
 func New(cfg config.Config) (*App, error) {
-	if err := cfg.Validate(); err != nil {
+	catalog, err := cfg.CompileCatalog()
+	if err != nil {
 		return nil, err
 	}
 	observation, err := observability.Setup(context.Background(), cfg.Observability)
@@ -69,9 +72,9 @@ func New(cfg config.Config) (*App, error) {
 	var supervisor application.DecisionProvider
 	switch cfg.Model.Provider {
 	case "fake":
-		supervisor = llm.NewFakeSupervisor()
+		supervisor = llm.NewFakeSupervisor(toFakeRoutes(catalog.Routes)...)
 	case "deepseek":
-		instruction, readErr := os.ReadFile(cfg.Agent.Supervisor.PromptFile)
+		instruction, readErr := os.ReadFile(catalog.Supervisor.PromptFile)
 		if readErr != nil {
 			return nil, fmt.Errorf("读取 Supervisor Prompt 失败: %w", readErr)
 		}
@@ -82,7 +85,7 @@ func New(cfg config.Config) (*App, error) {
 	default:
 		return nil, fmt.Errorf("model provider %q 未注册", cfg.Model.Provider)
 	}
-	userQuery := cfg.Tools["user_query"]
+	userQuery := catalog.Tools["user_query"]
 	var mcpClient *mcp.Client
 	if cfg.MCP.Enabled {
 		servers := make(map[string]mcp.Server, len(cfg.MCP.Servers))
@@ -99,7 +102,7 @@ func New(cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("Tool 装配失败: %w", err)
 	}
 	workers := make([]operation.WorkerContract, 0, len(cfg.Agent.Workers))
-	for workerID, worker := range cfg.Agent.Workers {
+	for workerID, worker := range catalog.Workers {
 		if worker.Enabled {
 			workers = append(workers, operation.WorkerContract{
 				WorkerID:       workerID,
@@ -110,18 +113,36 @@ func New(cfg config.Config) (*App, error) {
 		}
 	}
 	policy := agent.NewPolicyGate(workers, toolinfra.ContractsFor(userQuery.Implementation))
+	authenticator := authinfra.NewStaticBearerAuthenticator(cfg.Auth.Credentials)
 	deps := application.Dependencies{
 		Repository: repository,
 		Checkpoint: checkpoints,
 		EventBus:   events,
 		Supervisor: supervisor,
 		Policy:     policy,
+		RunAuth:    authinfra.OwnerRunAuthorizer{},
+		Runner:     application.SingleToolRunner{Tools: tools},
 		Tools:      tools,
 	}
-	app := &App{Config: cfg, Run: runapp.NewService(deps), Health: application.HealthService{Dependencies: deps}, Close: observation.Shutdown}
+	app := &App{Config: cfg, Authenticator: authenticator, Run: runapp.NewService(deps), Health: application.HealthService{Dependencies: deps}, Close: observation.Shutdown}
 	if !app.Health.Healthy() {
 		return nil, errors.New("应用依赖装配不完整")
 	}
 	cleanup = false
 	return app, nil
+}
+
+// toFakeRoutes 将经过启动校验的配置路由转换为 fake Supervisor 的只读快照。
+func toFakeRoutes(routes map[string]config.RouteConfig) []llm.FakeRoute {
+	converted := make([]llm.FakeRoute, 0, len(routes))
+	for _, route := range routes {
+		converted = append(converted, llm.FakeRoute{
+			WorkerID: route.WorkerID,
+			Intent:   route.Intent,
+			Matches:  append([]string(nil), route.Matches...),
+			ToolID:   route.ToolID,
+			Risk:     agent.Risk(route.Risk),
+		})
+	}
+	return converted
 }

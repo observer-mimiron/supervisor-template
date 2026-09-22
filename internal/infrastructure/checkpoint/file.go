@@ -67,13 +67,19 @@ func (s *FileStore) Save(snapshot agent.Checkpoint) (agent.Checkpoint, error) {
 
 // Get 读取某个 run 的最新 checkpoint。
 func (s *FileStore) Get(runID string) (agent.Checkpoint, bool) {
+	snapshot, ok, _ := s.GetWithError(runID)
+	return snapshot, ok
+}
+
+// GetWithError 读取 checkpoint，并保留损坏文件和不兼容版本错误。
+func (s *FileStore) GetWithError(runID string) (agent.Checkpoint, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snapshot, ok, err := s.readLocked(runID)
 	if err != nil || !ok {
-		return agent.Checkpoint{}, false
+		return agent.Checkpoint{}, false, err
 	}
-	return cloneCheckpoint(snapshot), true
+	return cloneCheckpoint(snapshot), true, nil
 }
 
 // readLocked 兼容未写 schema_version 的早期快照，并拒绝未知版本。

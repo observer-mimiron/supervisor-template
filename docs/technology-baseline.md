@@ -15,10 +15,11 @@
 | Agent 编排 | Eino 0.9.12 | Supervisor、Worker、Runner、Tool calling、Callback、interrupt/resume |
 | 真实模型适配 | Eino DeepSeek 0.1.6 | 可选的真实 ToolCallingChatModel；密钥只从环境变量读取 |
 | 配置 | BurntSushi TOML 1.4 | typed config、文件加载、环境变量覆盖和启动校验 |
+| 身份/资源授权 | 标准库 SHA-256 Bearer 适配器 + run owner 授权 | `/api/*` 先认证主体；run 的重放、审批、恢复和取消按主体隔离；不引入 JWT/OIDC/RBAC 依赖 |
 | 日志 | zap | 结构化日志和脱敏字段 |
 | 观测 | OpenTelemetry 1.43.0 + OTLP HTTP | Eino Callback、run event Trace、可选 Metric 和跨组件关联 |
-| v1 存储 | 内存 Repository、内存 checkpoint | 只验证合同和恢复语义，不承担生产持久化 |
-| v1 外部能力 | fake 默认；可选 DeepSeek 和 HTTP 只读 Tool | 不连接真实 CRM、营销渠道或外部写入系统；HTTP Tool 只发送固定地址 GET |
+| v1 存储 | 内存 Repository、内存 checkpoint；可选文件 Repository/checkpoint/event | 默认只验证合同；文件实现使用版本化 JSON、哈希路径和临时文件 rename，支持跨进程恢复但不承担数据库级高可用 |
+| v1 外部能力 | fake 默认；可选 DeepSeek、HTTP 只读 Tool 和受控 MCP Tool | 不连接真实 CRM、营销渠道或外部写入系统；MCP 只允许启动时注册的 server/tool，具备超时、输入/响应大小限制和错误分类 |
 
 版本号以实现时 `go.mod` 的锁定版本为准；本表使用主版本范围，避免方案文件成为未验证的依赖锁文件。
 
@@ -28,7 +29,8 @@
 - `tools.user_query.implementation = "http.read_only"` 可接入一个固定 endpoint 的 HTTP GET 只读能力；Tool ID、Worker allow-list、超时和 Final Guard 不变。
 - `observability.enabled = true` 时装配 OpenTelemetry OTLP HTTP trace/metric exporter，并安装 Eino ChatModel/Tool Callback；默认只记录结构信号和 token 数，不记录消息正文。
 - `LLM_API_KEY`、`OTEL_EXPORTER_OTLP_HEADERS` 等凭证只从环境变量读取，不进入 TOML、事件或 checkpoint。
-- M4 的持久化 checkpoint、MCP、认证、多租户和具体运营业务仍未实施。
+- M4 本轮已实施 T016 持久化 checkpoint、T017 受控 MCP Tool 和 T018 的最小认证/资源隔离边界；静态 Bearer 只适合本地/受控环境，完整 OIDC/JWT、RBAC 和 T019 具体运营业务延期。
+- 认证凭证只在环境变量中保存 SHA-256；主体的租户和用户标识随 run 请求快照保存，用于资源所有权校验，不保存原始 token。
 
 ## Dependency Placement
 
@@ -62,6 +64,7 @@ infrastructure  -> domain/application contracts
 - 步骤、重试、调用次数、审批超时、幂等窗口和 checkpoint 保留策略
 - 日志级别、Trace 采样率和外部服务地址
 - OTel 是否启用、service name、OTLP endpoint 和是否使用明文传输
+- 认证实现 ID、Bearer 哈希环境变量名、租户 ID 和主体 ID
 
 必须由代码固定：
 
@@ -100,3 +103,4 @@ infrastructure  -> domain/application contracts
 - HTTP/SSE smoke
 - 依赖方向和禁止依赖审计
 - 配置加载、环境变量覆盖和非法配置启动失败
+- 未认证请求、跨主体 run 操作和审批主体记录合同

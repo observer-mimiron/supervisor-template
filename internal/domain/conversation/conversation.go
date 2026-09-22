@@ -3,12 +3,17 @@
 // 本包只表达用户请求和会话标识，不决定路由、权限或 Tool 调用。
 package conversation
 
-import "time"
+import (
+	"time"
+
+	"github.com/observer-mimiron/supervisor-template/internal/domain/identity"
+)
 
 // ExecutionRequest 是一次用户发起的执行请求。
 type ExecutionRequest struct {
 	RunID          string
 	ConversationID string
+	Subject        identity.Subject
 	Message        string
 	RequestedAt    time.Time
 	ResumeOf       string

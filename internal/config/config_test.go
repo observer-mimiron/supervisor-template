@@ -15,6 +15,49 @@ func TestLoadExampleConfig(t *testing.T) {
 	if cfg.Agent.Supervisor.AllowedWorkers[0] != "user_analysis" {
 		t.Fatalf("allowed workers = %#v", cfg.Agent.Supervisor.AllowedWorkers)
 	}
+	if _, ok := cfg.Agent.Routes["user_query"]; !ok {
+		t.Fatalf("configured routes = %#v", cfg.Agent.Routes)
+	}
+}
+
+func TestCompileCatalogCopiesConfigReferences(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := cfg.CompileCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Agent.Workers["user_analysis"] = WorkerConfig{}
+	cfg.Agent.Routes["user_query"] = RouteConfig{}
+	if !catalog.Workers["user_analysis"].Enabled || catalog.Routes["user_query"].ToolID != "user_query" {
+		t.Fatalf("catalog was not detached from config: %#v", catalog)
+	}
+}
+
+func TestValidateRejectsRouteOutsideWorkerAllowList(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := cfg.Agent.Routes["user_query"]
+	route.ToolID = "missing_tool"
+	cfg.Agent.Routes["user_query"] = route
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "未启用 Tool") {
+		t.Fatalf("expected route tool rejection, got %v", err)
+	}
+}
+
+func TestValidateRejectsIncompleteAuthCredential(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Auth.Credentials[0].TokenSHA256Env = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "auth credential") {
+		t.Fatalf("expected auth credential rejection, got %v", err)
+	}
 }
 
 func TestValidateRejectsUnknownSupervisorWorker(t *testing.T) {

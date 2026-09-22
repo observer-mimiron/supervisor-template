@@ -17,6 +17,7 @@ import (
 )
 
 const maxResponseBytes = 1 << 20
+const maxArgumentBytes = 64 << 10
 
 // Server 描述一个启动时注册的 MCP 服务端及其工具白名单。
 type Server struct {
@@ -31,8 +32,10 @@ const (
 	ErrorInvalidConfig ErrorClass = "invalid_config"
 	ErrorDenied        ErrorClass = "server_denied"
 	ErrorTimeout       ErrorClass = "timeout"
+	ErrorUnavailable   ErrorClass = "unavailable"
 	ErrorHTTP          ErrorClass = "http_error"
 	ErrorProtocol      ErrorClass = "protocol_error"
+	ErrorBusiness      ErrorClass = "business_error"
 	ErrorService       ErrorClass = "service_error"
 )
 
@@ -94,9 +97,17 @@ func (c *Client) Call(ctx context.Context, serverID, toolID string, arguments ma
 	if c == nil || c.client == nil {
 		return "", &Error{Class: ErrorService, Err: errors.New("MCP client 未装配")}
 	}
+	if strings.TrimSpace(toolID) == "" {
+		return "", &Error{Class: ErrorProtocol, Err: errors.New("MCP tool id 不能为空")}
+	}
 	server, ok := c.servers[serverID]
 	if !ok || !contains(server.AllowedTools, toolID) {
 		return "", &Error{Class: ErrorDenied, Err: errors.New("MCP server 或 tool 不在 allow-list")}
+	}
+	for key, value := range arguments {
+		if strings.TrimSpace(key) == "" || strings.ContainsAny(key, "\r\n\x00") || strings.ContainsAny(value, "\r\n\x00") {
+			return "", &Error{Class: ErrorProtocol, Err: errors.New("MCP 参数包含非法字符")}
+		}
 	}
 	payload := map[string]any{
 		"jsonrpc": "2.0",
@@ -111,6 +122,9 @@ func (c *Client) Call(ctx context.Context, serverID, toolID string, arguments ma
 	if err != nil {
 		return "", &Error{Class: ErrorProtocol, Err: err}
 	}
+	if len(body) > maxArgumentBytes {
+		return "", &Error{Class: ErrorProtocol, Err: errors.New("MCP 请求参数超过大小限制")}
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.Endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return "", &Error{Class: ErrorInvalidConfig, Err: err}
@@ -122,15 +136,19 @@ func (c *Client) Call(ctx context.Context, serverID, toolID string, arguments ma
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return "", &Error{Class: ErrorTimeout, Err: err}
 		}
-		return "", &Error{Class: ErrorService, Err: err}
+		return "", &Error{Class: ErrorUnavailable, Err: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return "", &Error{Class: ErrorHTTP, Err: fmt.Errorf("MCP server returned HTTP %d", response.StatusCode)}
+		class := ErrorHTTP
+		if response.StatusCode >= http.StatusInternalServerError {
+			class = ErrorUnavailable
+		}
+		return "", &Error{Class: class, Err: fmt.Errorf("MCP server returned HTTP %d", response.StatusCode)}
 	}
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
-		return "", &Error{Class: ErrorService, Err: err}
+		return "", &Error{Class: ErrorUnavailable, Err: err}
 	}
 	if len(responseBody) > maxResponseBytes {
 		return "", &Error{Class: ErrorProtocol, Err: errors.New("MCP response exceeds size limit")}
@@ -152,7 +170,7 @@ func parseResult(data []byte) (string, error) {
 		return "", &Error{Class: ErrorProtocol, Err: err}
 	}
 	if response.Error != nil {
-		return "", &Error{Class: ErrorService, Err: errors.New(response.Error.Message)}
+		return "", &Error{Class: ErrorBusiness, Err: errors.New(response.Error.Message)}
 	}
 	var result struct {
 		Content []struct {

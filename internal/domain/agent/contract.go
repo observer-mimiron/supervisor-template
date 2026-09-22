@@ -55,6 +55,8 @@ const (
 	ErrorInternal          ErrorCode = "INTERNAL_ERROR"
 	ErrorApprovalRequired  ErrorCode = "APPROVAL_REQUIRED"
 	ErrorRunNotResumable   ErrorCode = "RUN_NOT_RESUMABLE"
+	ErrorUnauthenticated   ErrorCode = "UNAUTHENTICATED"
+	ErrorAccessDenied      ErrorCode = "ACCESS_DENIED"
 )
 
 // SupervisorDecision 是模型或 Supervisor 提出的候选路由，不代表授权结果。
@@ -79,6 +81,8 @@ type ApprovedRoute struct {
 // PlanStep 是执行计划中的一个有序步骤。
 type PlanStep struct {
 	StepID         string
+	WorkerID       string
+	Intent         string
 	ToolID         string
 	Input          map[string]string
 	Status         StepStatus

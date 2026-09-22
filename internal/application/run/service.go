@@ -17,6 +17,7 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/approval"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/identity"
 )
 
 // Error 是可映射为公开稳定分类的运行错误。
@@ -49,12 +50,24 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 	if request.RunID == "" {
 		request.RunID = s.newRunID()
 	}
+	if !request.Subject.Valid() {
+		return request.RunID, &Error{Code: agent.ErrorUnauthenticated, Message: "身份凭证无效"}
+	}
 	if request.ConversationID == "" || strings.TrimSpace(request.Message) == "" {
 		return request.RunID, &Error{Code: "INVALID_REQUEST", Message: "会话和消息不能为空"}
 	}
 	if existing := s.deps.EventBus.Events(request.RunID); len(existing) > 0 {
-		stored, ok := s.deps.Repository.GetRequest(request.RunID)
-		if !ok || stored.ConversationID != request.ConversationID {
+		stored, ok, err := s.loadRequest(request.RunID)
+		if err != nil {
+			return request.RunID, err
+		}
+		if !ok {
+			return request.RunID, &Error{Code: agent.ErrorAccessDenied, Message: "无权访问此执行"}
+		}
+		if err := s.authorize(ctx, request.Subject, stored.Subject); err != nil {
+			return request.RunID, err
+		}
+		if stored.ConversationID != request.ConversationID {
 			return request.RunID, &Error{Code: agent.ErrorRunNotResumable, Message: "run_id 不属于当前会话"}
 		}
 		return request.RunID, nil
@@ -87,6 +100,8 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 	}
 	step := agent.PlanStep{
 		StepID:         request.RunID + ":step-1",
+		WorkerID:       decision.WorkerID,
+		Intent:         decision.Intent,
 		ToolID:         route.AllowedTools[0],
 		Input:          cloneMap(decision.Arguments),
 		Status:         agent.StepPending,
@@ -136,11 +151,17 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 	return request.RunID, nil
 }
 
-// Approve 写入审批决定；批准只解除门控，实际 Tool 调用由 Resume 推进。
-func (s *Service) Approve(_ context.Context, runID, decision, reviewer string) error {
+// Approve 写入认证主体的审批决定；批准只解除门控，实际 Tool 调用由 Resume 推进。
+func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, decision string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	request, ok := s.approvalLocked(runID)
+	if err := s.authorizeRun(ctx, subject, runID); err != nil {
+		return err
+	}
+	request, ok, err := s.approvalLocked(runID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return &Error{Code: "RUN_NOT_RESUMABLE", Message: "当前执行不等待审批"}
 	}
@@ -154,14 +175,17 @@ func (s *Service) Approve(_ context.Context, runID, decision, reviewer string) e
 	if request.Status != approval.Pending {
 		return nil
 	}
-	if err := request.Decide(status, reviewer, s.now()); err != nil {
+	if err := request.Decide(status, subject.SubjectID, s.now()); err != nil {
 		return &Error{Code: "INVALID_REQUEST", Message: err.Error()}
 	}
 	if err := s.deps.Repository.SaveApproval(*request); err != nil {
 		return err
 	}
 	if request.Status == approval.Rejected {
-		plan, ok := s.deps.Repository.GetPlan(runID)
+		plan, ok, err := s.loadPlan(runID)
+		if err != nil {
+			return err
+		}
 		if !ok {
 			return &Error{Code: agent.ErrorRunNotResumable, Message: "执行计划不存在"}
 		}
@@ -174,18 +198,26 @@ func (s *Service) Approve(_ context.Context, runID, decision, reviewer string) e
 	return nil
 }
 
-// Cancel 将未终态执行标记为 canceled，并持久化唯一取消事件。
-func (s *Service) Cancel(_ context.Context, runID string) error {
+// Cancel 将主体拥有的未终态执行标记为 canceled，并持久化唯一取消事件。
+func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	plan, ok := s.deps.Repository.GetPlan(runID)
+	if err := s.authorizeRun(ctx, subject, runID); err != nil {
+		return err
+	}
+	plan, ok, err := s.loadPlan(runID)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return &Error{Code: agent.ErrorRunNotResumable, Message: "执行不存在或不可取消"}
 	}
 	if agent.IsTerminal(plan.Status) {
 		return nil
 	}
-	if request, ok := s.approvalLocked(runID); ok && request.Status == approval.Pending {
+	if request, ok, err := s.approvalLocked(runID); err != nil {
+		return err
+	} else if ok && request.Status == approval.Pending {
 		_ = request.Decide(approval.Expired, "", s.now())
 		_ = s.deps.Repository.SaveApproval(*request)
 	}
@@ -197,18 +229,33 @@ func (s *Service) Cancel(_ context.Context, runID string) error {
 	return nil
 }
 
-// Resume 从 checkpoint 继续执行；终态 run 只返回原事件，不再次调用 Tool。
-func (s *Service) Resume(ctx context.Context, runID string) ([]agent.RunEvent, error) {
+// Resume 从 checkpoint 恢复主体拥有的执行；终态 run 只返回原事件，不再次调用 Tool。
+func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID string) ([]agent.RunEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	plan, ok := s.deps.Repository.GetPlan(runID)
+	if err := s.authorizeRun(ctx, subject, runID); err != nil {
+		return nil, err
+	}
+	plan, ok, err := s.loadPlan(runID)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return nil, &Error{Code: "RUN_NOT_RESUMABLE", Message: "执行不存在或不可恢复"}
+	}
+	if snapshot, found, err := s.loadCheckpoint(runID); err != nil {
+		return nil, err
+	} else if found && snapshot.PlanID != plan.PlanID {
+		return nil, &Error{Code: "RUN_NOT_RESUMABLE", Message: "checkpoint 与执行计划不匹配"}
 	}
 	if agent.IsTerminal(plan.Status) {
 		return s.deps.EventBus.Events(runID), nil
 	}
-	if approvalRequest, ok := s.approvalLocked(runID); ok && approvalRequest.Status == approval.Pending {
+	approvalRequest, ok, err := s.approvalLocked(runID)
+	if err != nil {
+		return nil, err
+	}
+	if ok && approvalRequest.Status == approval.Pending {
 		return nil, &Error{Code: "APPROVAL_REQUIRED", Message: "执行仍等待审批"}
 	}
 	if err := s.executeLocked(ctx, plan); err != nil {
@@ -221,16 +268,19 @@ func (s *Service) Resume(ctx context.Context, runID string) ([]agent.RunEvent, e
 func (s *Service) Events(runID string) []agent.RunEvent { return s.deps.EventBus.Events(runID) }
 
 // approvalLocked 先读进程缓存，再从 Repository 恢复审批快照，支持重启后的 resume。
-func (s *Service) approvalLocked(runID string) (*approval.Request, bool) {
+func (s *Service) approvalLocked(runID string) (*approval.Request, bool, error) {
 	if request := s.approvals[runID]; request != nil {
-		return request, true
+		return request, true, nil
 	}
-	request, ok := s.deps.Repository.GetApproval(runID)
+	request, ok, err := s.loadApproval(runID)
+	if err != nil {
+		return nil, false, err
+	}
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	s.approvals[runID] = &request
-	return &request, true
+	return &request, true, nil
 }
 
 // executeLocked 执行一个已批准步骤；全局锁保证重复 resume 不会并发触发副作用。
@@ -250,7 +300,10 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	}
 	step := &plan.Steps[0]
 	if step.Status == agent.StepWaitingApproval {
-		request, ok := s.approvalLocked(plan.RunID)
+		request, ok, err := s.approvalLocked(plan.RunID)
+		if err != nil {
+			return err
+		}
 		if !ok || request.Status != approval.Approved {
 			return &Error{Code: "APPROVAL_REQUIRED", Message: "执行仍等待审批"}
 		}
@@ -261,7 +314,11 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if err := s.deps.Repository.SavePlan(plan); err != nil {
 		return err
 	}
-	if err := s.saveCheckpointLocked(plan, nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)); err != nil {
+	version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
+	if err != nil {
+		return err
+	}
+	if err := s.saveCheckpointLocked(plan, version); err != nil {
 		return err
 	}
 	if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "running", "step_id": step.StepID}); err != nil {
@@ -276,7 +333,19 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		toolCtx, cancel = context.WithDeadline(ctx, plan.Deadline)
 	}
 	defer cancel()
-	result, err := s.deps.Tools.Execute(toolCtx, step.ToolID, step.Input, step.IdempotencyKey)
+	runner := s.workerRunner()
+	if runner == nil {
+		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInternal, "Worker Runner 未装配")
+	}
+	workerResult, err := runner.Run(toolCtx, application.WorkerRequest{
+		RunID:          plan.RunID,
+		WorkerID:       step.WorkerID,
+		Intent:         step.Intent,
+		ToolID:         step.ToolID,
+		Input:          cloneMap(step.Input),
+		IdempotencyKey: step.IdempotencyKey,
+		Deadline:       plan.Deadline,
+	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(toolCtx.Err(), context.Canceled) {
 			return s.terminateLocked(&plan, agent.RunCanceled, agent.ErrorCanceled, "执行已取消")
@@ -286,6 +355,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		}
 		return s.terminateLocked(&plan, agent.RunFailed, "TOOL_ERROR", "能力执行失败")
 	}
+	result := workerResult.Content
 	if err := guardToolResult(result); err != nil {
 		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInvalidOutput, "能力输出未通过安全校验")
 	}
@@ -295,7 +365,11 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if err := s.deps.Repository.SavePlan(plan); err != nil {
 		return err
 	}
-	if err := s.saveCheckpointLocked(plan, nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)); err != nil {
+	version, err = nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
+	if err != nil {
+		return err
+	}
+	if err := s.saveCheckpointLocked(plan, version); err != nil {
 		return err
 	}
 	if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "succeeded", "step_id": step.StepID}); err != nil {
@@ -305,6 +379,46 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		return err
 	}
 	return s.emitLocked(plan.RunID, agent.Completed, map[string]string{"message": "执行完成"})
+}
+
+// workerRunner 返回新的执行合同；旧测试和旧装配仅注入 Tool 时使用兼容适配器。
+func (s *Service) workerRunner() application.WorkerRunner {
+	if s.deps.Runner != nil {
+		return s.deps.Runner
+	}
+	if s.deps.Tools != nil {
+		return application.SingleToolRunner{Tools: s.deps.Tools}
+	}
+	return nil
+}
+
+// authorizeRun 从持久化请求读取 run 所有者，避免仅凭 run_id 暴露或控制执行。
+func (s *Service) authorizeRun(ctx context.Context, subject identity.Subject, runID string) error {
+	request, found, err := s.loadRequest(runID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return &Error{Code: agent.ErrorAccessDenied, Message: "无权访问此执行"}
+	}
+	return s.authorize(ctx, subject, request.Subject)
+}
+
+// authorize 将用户资源授权与模型路由后的 Policy Gate 保持为两个独立关口。
+func (s *Service) authorize(ctx context.Context, subject, owner identity.Subject) error {
+	if !subject.Valid() {
+		return &Error{Code: agent.ErrorUnauthenticated, Message: "身份凭证无效"}
+	}
+	if s.deps.RunAuth == nil {
+		return &Error{Code: agent.ErrorInternal, Message: "访问控制未装配"}
+	}
+	if err := s.deps.RunAuth.Authorize(ctx, subject, owner); err != nil {
+		if errors.Is(err, application.ErrAccessDenied) {
+			return &Error{Code: agent.ErrorAccessDenied, Message: "无权访问此执行"}
+		}
+		return err
+	}
+	return nil
 }
 
 // saveCheckpointLocked 保存恢复所需的最小快照。
@@ -349,7 +463,11 @@ func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunSta
 	if err := s.deps.Repository.SavePlan(*plan); err != nil {
 		return err
 	}
-	if err := s.saveCheckpointLocked(*plan, nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)); err != nil {
+	version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
+	if err != nil {
+		return err
+	}
+	if err := s.saveCheckpointLocked(*plan, version); err != nil {
 		return err
 	}
 	eventType := agent.Failed
@@ -362,9 +480,10 @@ func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunSta
 	return &Error{Code: code, Message: message}
 }
 
-// emitLocked 生成连续事件 ID；事件顺序由 EventStore 再次校验。
+// emitLocked 按已持久化事件生成稳定 ID；事件顺序由 EventStore 再次校验。
 func (s *Service) emitLocked(runID string, eventType agent.EventType, data map[string]string) error {
-	_, err := s.deps.EventBus.Append(agent.RunEvent{EventID: fmt.Sprintf("%s:event:%d", runID, s.sequence.Add(1)), RunID: runID, Type: eventType, OccurredAt: s.now(), Data: cloneMap(data), RedactionClass: "public"})
+	eventID := fmt.Sprintf("%s:event:%d", runID, len(s.deps.EventBus.Events(runID))+1)
+	_, err := s.deps.EventBus.Append(agent.RunEvent{EventID: eventID, RunID: runID, Type: eventType, OccurredAt: s.now(), Data: cloneMap(data), RedactionClass: "public"})
 	return err
 }
 
@@ -373,11 +492,53 @@ func (s *Service) newRunID() string {
 	return fmt.Sprintf("run-%d-%d", s.now().UnixNano(), s.sequence.Add(1))
 }
 
-func nextCheckpointVersion(store application.CheckpointStore, runID string) int64 {
-	if snapshot, ok := store.Get(runID); ok {
-		return snapshot.Version + 1
+func nextCheckpointVersion(store application.CheckpointStore, runID string) (int64, error) {
+	if reader, ok := store.(application.CheckpointReader); ok {
+		snapshot, found, err := reader.GetWithError(runID)
+		if err != nil {
+			return 0, err
+		}
+		if found {
+			return snapshot.Version + 1, nil
+		}
+		return 1, nil
 	}
-	return 1
+	if snapshot, ok := store.Get(runID); ok {
+		return snapshot.Version + 1, nil
+	}
+	return 1, nil
+}
+
+func (s *Service) loadRequest(runID string) (conversation.ExecutionRequest, bool, error) {
+	if reader, ok := s.deps.Repository.(application.RepositoryReader); ok {
+		return reader.LoadRequest(runID)
+	}
+	request, found := s.deps.Repository.GetRequest(runID)
+	return request, found, nil
+}
+
+func (s *Service) loadApproval(runID string) (approval.Request, bool, error) {
+	if reader, ok := s.deps.Repository.(application.RepositoryReader); ok {
+		return reader.LoadApproval(runID)
+	}
+	request, found := s.deps.Repository.GetApproval(runID)
+	return request, found, nil
+}
+
+func (s *Service) loadPlan(runID string) (agent.ExecutionPlan, bool, error) {
+	if reader, ok := s.deps.Repository.(application.RepositoryReader); ok {
+		return reader.LoadPlan(runID)
+	}
+	plan, found := s.deps.Repository.GetPlan(runID)
+	return plan, found, nil
+}
+
+func (s *Service) loadCheckpoint(runID string) (agent.Checkpoint, bool, error) {
+	if reader, ok := s.deps.Checkpoint.(application.CheckpointReader); ok {
+		return reader.GetWithError(runID)
+	}
+	snapshot, found := s.deps.Checkpoint.Get(runID)
+	return snapshot, found, nil
 }
 
 func classifyPolicyError(err error) agent.ErrorCode {

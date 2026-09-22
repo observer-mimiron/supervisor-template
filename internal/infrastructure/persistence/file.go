@@ -65,13 +65,19 @@ func (r *FileRepository) SaveRequest(request conversation.ExecutionRequest) erro
 
 // GetRequest 读取一个已持久化的请求快照。
 func (r *FileRepository) GetRequest(runID string) (conversation.ExecutionRequest, bool) {
+	request, ok, _ := r.LoadRequest(runID)
+	return request, ok
+}
+
+// LoadRequest 读取请求并保留损坏文件和不兼容版本错误。
+func (r *FileRepository) LoadRequest(runID string) (conversation.ExecutionRequest, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record, err := r.readLocked(runID)
 	if err != nil || record.Request == nil {
-		return conversation.ExecutionRequest{}, false
+		return conversation.ExecutionRequest{}, false, err
 	}
-	return *record.Request, true
+	return *record.Request, true, nil
 }
 
 // SaveApproval 保存审批状态，供重启后的 resume 继续使用原审批结果。
@@ -94,13 +100,19 @@ func (r *FileRepository) SaveApproval(request approval.Request) error {
 
 // GetApproval 读取一个 run 的审批快照。
 func (r *FileRepository) GetApproval(runID string) (approval.Request, bool) {
+	request, ok, _ := r.LoadApproval(runID)
+	return request, ok
+}
+
+// LoadApproval 读取审批并保留损坏文件和不兼容版本错误。
+func (r *FileRepository) LoadApproval(runID string) (approval.Request, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record, err := r.readLocked(runID)
 	if err != nil || record.Approval == nil {
-		return approval.Request{}, false
+		return approval.Request{}, false, err
 	}
-	return *record.Approval, true
+	return *record.Approval, true, nil
 }
 
 // SavePlan 保存计划，并拒绝把已完成步骤回写为未完成。
@@ -131,13 +143,19 @@ func (r *FileRepository) SavePlan(plan agent.ExecutionPlan) error {
 
 // GetPlan 读取一个 run 的计划快照。
 func (r *FileRepository) GetPlan(runID string) (agent.ExecutionPlan, bool) {
+	plan, ok, _ := r.LoadPlan(runID)
+	return plan, ok
+}
+
+// LoadPlan 读取计划并保留损坏文件和不兼容版本错误。
+func (r *FileRepository) LoadPlan(runID string) (agent.ExecutionPlan, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record, err := r.readLocked(runID)
 	if err != nil || record.Plan == nil {
-		return agent.ExecutionPlan{}, false
+		return agent.ExecutionPlan{}, false, err
 	}
-	return clonePlan(*record.Plan), true
+	return clonePlan(*record.Plan), true, nil
 }
 
 // readLocked 读取单个 run 文件；不存在时返回空记录，便于首次写入。

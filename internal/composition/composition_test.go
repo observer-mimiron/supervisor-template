@@ -10,6 +10,7 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/identity"
 )
 
 func TestNewBuildsHealthyMemoryGraph(t *testing.T) {
@@ -53,6 +54,7 @@ func TestNewRoutesConfiguredHTTPReadOnlyToolThroughApplicationContracts(t *testi
 	runID, err := app.Run.Start(context.Background(), conversation.ExecutionRequest{
 		RunID:          "run-http-tool",
 		ConversationID: "conversation-1",
+		Subject:        identity.Subject{TenantID: "test-tenant", SubjectID: "test-user"},
 		Message:        "分析示例用户分群",
 	})
 	if err != nil {

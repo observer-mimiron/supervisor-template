@@ -26,6 +26,15 @@ temperature = 0.2
 max_tokens = 1024
 timeout = "30s"
 
+[auth]
+implementation = "static_bearer"
+
+[[auth.credentials]]
+# Store sha256("your-local-token") in this environment variable; never commit the raw token.
+token_sha256_env = "AGENT_AUTH_DEMO_TOKEN_SHA256"
+tenant_id = "demo-tenant"
+subject_id = "demo-user"
+
 [agent.supervisor]
 enabled = true
 implementation = "eino.chat_model_agent"
@@ -36,9 +45,24 @@ max_steps = 8
 [agent.workers.user_analysis]
 enabled = true
 implementation = "fake.user_analysis"
+runner = "single_tool"
 prompt_file = "prompts/user_analysis.md"
 allowed_tools = ["user_query", "simulated_outreach"]
 timeout = "20s"
+
+[agent.routes.user_query]
+worker = "user_analysis"
+intent = "user_analysis"
+matches = ["分析", "查询", "分群"]
+tool = "user_query"
+risk = "read_only"
+
+[agent.routes.simulated_outreach]
+worker = "user_analysis"
+intent = "user_analysis"
+matches = ["触达", "发送", "模拟写入"]
+tool = "simulated_outreach"
+risk = "side_effect"
 
 [tools.user_query]
 enabled = true

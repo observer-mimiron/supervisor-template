@@ -20,6 +20,7 @@ type Config struct {
 	Server        ServerConfig          `toml:"server"`
 	Model         ModelConfig           `toml:"model"`
 	Agent         AgentConfig           `toml:"agent"`
+	Auth          AuthConfig            `toml:"auth"`
 	Tools         map[string]ToolConfig `toml:"tools"`
 	Limits        LimitsConfig          `toml:"limits"`
 	Approval      ApprovalConfig        `toml:"approval"`
@@ -59,6 +60,21 @@ type ModelConfig struct {
 type AgentConfig struct {
 	Supervisor SupervisorConfig        `toml:"supervisor"`
 	Workers    map[string]WorkerConfig `toml:"workers"`
+	Routes     map[string]RouteConfig  `toml:"routes"`
+}
+
+// AuthConfig 选择启动时固定的身份认证实现。
+// 凭证本身只以哈希形式保存在环境变量，不写入 TOML。
+type AuthConfig struct {
+	Implementation string             `toml:"implementation"`
+	Credentials    []BearerCredential `toml:"credentials"`
+}
+
+// BearerCredential 将一个 Bearer token 的 SHA-256 哈希绑定到固定主体。
+type BearerCredential struct {
+	TokenSHA256Env string `toml:"token_sha256_env"`
+	TenantID       string `toml:"tenant_id"`
+	SubjectID      string `toml:"subject_id"`
 }
 
 // SupervisorConfig 描述 Supervisor 的实现和能力白名单。
@@ -74,10 +90,20 @@ type SupervisorConfig struct {
 type WorkerConfig struct {
 	Enabled        bool          `toml:"enabled"`
 	Implementation string        `toml:"implementation"`
+	Runner         string        `toml:"runner"`
 	PromptFile     string        `toml:"prompt_file"`
 	AllowedTools   []string      `toml:"allowed_tools"`
 	Timeout        time.Duration `toml:"-"`
 	TimeoutText    string        `toml:"timeout"`
+}
+
+// RouteConfig 描述一条配置路由；它只能引用已注册 Worker 和 Tool。
+type RouteConfig struct {
+	WorkerID string   `toml:"worker"`
+	Intent   string   `toml:"intent"`
+	Matches  []string `toml:"matches"`
+	ToolID   string   `toml:"tool"`
+	Risk     string   `toml:"risk"`
 }
 
 // ToolConfig 描述一个已注册 Tool 的风险和执行限制。
@@ -164,6 +190,17 @@ func Load(path string) (Config, error) {
 
 // Validate 确保配置只能选择已注册实现，且预算和时间边界有效。
 func (c Config) Validate() error {
+	if c.Auth.Implementation != "static_bearer" {
+		return fmt.Errorf("auth implementation %q 未注册", c.Auth.Implementation)
+	}
+	if len(c.Auth.Credentials) == 0 {
+		return errors.New("auth 必须配置至少一个 Bearer 凭证")
+	}
+	for index, credential := range c.Auth.Credentials {
+		if strings.TrimSpace(credential.TokenSHA256Env) == "" || strings.TrimSpace(credential.TenantID) == "" || strings.TrimSpace(credential.SubjectID) == "" {
+			return fmt.Errorf("auth credential %d 不完整", index)
+		}
+	}
 	if backend := strings.TrimSpace(c.Storage.Backend); backend != "" && backend != "memory" && backend != "file" {
 		return fmt.Errorf("storage.backend %q 未注册", backend)
 	}
@@ -220,6 +257,9 @@ func (c Config) Validate() error {
 		if worker.Enabled && worker.Implementation != "fake.user_analysis" {
 			return fmt.Errorf("Worker %q 实现未注册", workerID)
 		}
+		if worker.Enabled && worker.Runner != "" && worker.Runner != "single_tool" {
+			return fmt.Errorf("Worker %q Runner %q 未注册", workerID, worker.Runner)
+		}
 		if worker.Enabled && worker.Timeout <= 0 {
 			return fmt.Errorf("Worker %q timeout 必须大于 0", workerID)
 		}
@@ -228,6 +268,34 @@ func (c Config) Validate() error {
 			if !ok || !tool.Enabled {
 				return fmt.Errorf("Worker %q 引用了未启用 Tool %q", workerID, toolID)
 			}
+		}
+	}
+	for routeID, route := range c.Agent.Routes {
+		if strings.TrimSpace(route.WorkerID) == "" || strings.TrimSpace(route.ToolID) == "" || strings.TrimSpace(route.Intent) == "" {
+			return fmt.Errorf("route %q 缺少 worker/tool/intent", routeID)
+		}
+		worker, ok := c.Agent.Workers[route.WorkerID]
+		if !ok || !worker.Enabled {
+			return fmt.Errorf("route %q 引用了未启用 Worker %q", routeID, route.WorkerID)
+		}
+		if !contains(c.Agent.Supervisor.AllowedWorkers, route.WorkerID) {
+			return fmt.Errorf("route %q 的 Worker %q 不在 Supervisor allow-list", routeID, route.WorkerID)
+		}
+		tool, ok := c.Tools[route.ToolID]
+		if !ok || !tool.Enabled {
+			return fmt.Errorf("route %q 引用了未启用 Tool %q", routeID, route.ToolID)
+		}
+		if !contains(worker.AllowedTools, route.ToolID) {
+			return fmt.Errorf("route %q 的 Tool %q 不在 Worker allow-list", routeID, route.ToolID)
+		}
+		if route.Risk != "read_only" && route.Risk != "side_effect" {
+			return fmt.Errorf("route %q risk 非法", routeID)
+		}
+		if tool.Risk == "side_effect" && route.Risk != "side_effect" {
+			return fmt.Errorf("route %q 未声明副作用风险", routeID)
+		}
+		if len(route.Matches) == 0 {
+			return fmt.Errorf("route %q 至少需要一个 matches", routeID)
 		}
 	}
 	for toolID, tool := range c.Tools {
