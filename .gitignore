@@ -13,10 +13,10 @@ build/
 .idea/
 .vscode/
 .codegraph/
+agent-architecture-references/
 
 # Local planning and workspace artifacts
 AGENTS.md
-PLAN.md
 PROGRESS.md
 .agents/
 .specify/
