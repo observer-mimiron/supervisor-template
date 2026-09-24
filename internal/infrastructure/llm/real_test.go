@@ -25,7 +25,7 @@ func (m fixedChatModel) Generate(context.Context, []*schema.Message, ...einomode
 }
 
 func TestRealSupervisorParsesStructuredDecisionAndOwnsDecisionID(t *testing.T) {
-	supervisor := NewRealSupervisor(fixedChatModel{content: "```json\n{\"decision_id\":\"model-controlled\",\"worker_id\":\"user_analysis\",\"intent\":\"query\",\"arguments\":{\"tool_id\":\"user_query\",\"message\":\"分析\"},\"risk\":\"read_only\",\"confidence\":0.9}\n```"}, "", time.Second)
+	supervisor := NewRealSupervisor(fixedChatModel{content: `{"decision_id":"model-controlled","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query","message":"分析"},"risk":"read_only","confidence":0.9}`}, "", time.Second)
 	decision, err := supervisor.Decide(context.Background(), conversation.ExecutionRequest{RunID: "run-1", Message: "分析"})
 	if err != nil {
 		t.Fatal(err)
@@ -38,10 +38,39 @@ func TestRealSupervisorParsesStructuredDecisionAndOwnsDecisionID(t *testing.T) {
 	}
 }
 
+func TestParseDecisionRejectsFencesProseAndTrailingData(t *testing.T) {
+	base := `{"decision_id":"d1","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query"},"risk":"read_only","confidence":1}`
+	for name, raw := range map[string]string{
+		"fence":    "```json\n" + base + "\n```",
+		"prose":    "here is the decision: " + base,
+		"trailing": base + "\n{}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseDecision(raw); err == nil {
+				t.Fatal("expected whole-response rejection")
+			}
+		})
+	}
+}
+
 func TestParseDecisionRejectsUnknownFields(t *testing.T) {
 	_, err := parseDecision(`{"decision_id":"d1","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query"},"risk":"read_only","confidence":1,"approval":true}`)
 	if err == nil {
 		t.Fatal("expected unknown field rejection")
+	}
+}
+
+func TestParseDecisionRejectsInvalidRouteShape(t *testing.T) {
+	for name, raw := range map[string]string{
+		"missing-tool":       `{"decision_id":"d1","worker_id":"user_analysis","intent":"query","arguments":{},"risk":"read_only","confidence":1}`,
+		"invalid-risk":       `{"decision_id":"d1","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query"},"risk":"admin","confidence":1}`,
+		"invalid-confidence": `{"decision_id":"d1","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query"},"risk":"read_only","confidence":2}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseDecision(raw); err == nil {
+				t.Fatal("expected strict route rejection")
+			}
+		})
 	}
 }
 

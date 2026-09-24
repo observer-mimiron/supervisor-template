@@ -27,3 +27,30 @@ func TestFakeSupervisorUsesConfiguredRoute(t *testing.T) {
 		t.Fatalf("configured route was ignored: %#v", decision)
 	}
 }
+
+func TestFakeSupervisorRejectsEmptyMessage(t *testing.T) {
+	_, err := NewFakeSupervisor().Decide(context.Background(), conversation.ExecutionRequest{RunID: "empty"})
+	if err == nil {
+		t.Fatal("expected empty message rejection")
+	}
+}
+
+func TestFakeSupervisorCanExposeUnknownCapabilityForPolicyTest(t *testing.T) {
+	decision, err := NewFakeSupervisor().Decide(context.Background(), conversation.ExecutionRequest{RunID: "unknown", Message: "未知能力"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Arguments["tool_id"] != "not_registered" {
+		t.Fatalf("tool id = %q", decision.Arguments["tool_id"])
+	}
+}
+
+func TestFakeSupervisorRejectsArbitraryUnmatchedMessageAsUnknownRoute(t *testing.T) {
+	decision, err := NewFakeSupervisor().Decide(context.Background(), conversation.ExecutionRequest{RunID: "unmatched", Message: "请帮我写一首诗"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Arguments["tool_id"] != "not_registered" {
+		t.Fatalf("unmatched message defaulted to tool %q", decision.Arguments["tool_id"])
+	}
+}

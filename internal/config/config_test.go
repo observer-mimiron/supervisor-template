@@ -36,6 +36,64 @@ func TestCompileCatalogCopiesConfigReferences(t *testing.T) {
 	}
 }
 
+func TestCompileRuntimeCatalogReturnsFrozenCopies(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := cfg.CompileRuntimeCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workers := catalog.Workers()
+	workers["user_analysis"] = WorkerConfig{}
+	workers["user_analysis"] = catalog.Workers()["user_analysis"]
+	tools := catalog.Tools()
+	tool := tools["user_query"]
+	tool.Implementation = "tampered"
+	tools["user_query"] = tool
+	if catalog.Workers()["user_analysis"].Implementation != "fake.user_analysis" || catalog.Tools()["user_query"].Implementation != "fake.user_query" {
+		t.Fatal("runtime catalog leaked mutable map state")
+	}
+	supervisor := catalog.Supervisor()
+	supervisor.AllowedWorkers[0] = "tampered"
+	if catalog.Supervisor().AllowedWorkers[0] != "user_analysis" {
+		t.Fatal("runtime catalog leaked mutable slice state")
+	}
+}
+
+func TestCompileRuntimeCatalogRejectsMissingPromptAndRunner(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Agent.Supervisor.PromptFile = ""
+	if _, err := cfg.CompileRuntimeCatalog(); err == nil || !strings.Contains(err.Error(), "Supervisor Prompt") {
+		t.Fatalf("expected missing supervisor prompt rejection, got %v", err)
+	}
+	cfg, _ = Load(filepath.Join("..", "..", "config.example.toml"))
+	worker := cfg.Agent.Workers["user_analysis"]
+	worker.Runner = ""
+	cfg.Agent.Workers["user_analysis"] = worker
+	if _, err := cfg.CompileRuntimeCatalog(); err == nil || !strings.Contains(err.Error(), "Runner") {
+		t.Fatalf("expected missing worker runner rejection, got %v", err)
+	}
+}
+
+func TestValidateRejectsDuplicateAllowListReferences(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Agent.Workers["user_analysis"] = WorkerConfig{
+		Enabled: true, Implementation: "fake.user_analysis", Runner: "single_tool",
+		PromptFile: "prompts/user_analysis.md", AllowedTools: []string{"user_query", "user_query"}, Timeout: cfg.Agent.Workers["user_analysis"].Timeout,
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "重复引用") {
+		t.Fatalf("expected duplicate allow-list rejection, got %v", err)
+	}
+}
+
 func TestValidateRejectsRouteOutsideWorkerAllowList(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
 	if err != nil {

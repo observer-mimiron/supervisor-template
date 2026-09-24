@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/checkpoint"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/eventbus"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/llm"
+	meminfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/memory"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/persistence"
 	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
@@ -118,6 +120,22 @@ func TestReadOnlyRunCompletesOnceAndReplaysTerminalEvents(t *testing.T) {
 	}
 }
 
+func TestReadOnlyRunEmitsCompleteAuditSequence(t *testing.T) {
+	service, _ := newTestService()
+	runID, err := service.Start(context.Background(), request("run-audit", "分析示例用户分群"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var types []agent.EventType
+	for _, event := range service.Events(runID) {
+		types = append(types, event.Type)
+	}
+	want := []agent.EventType{agent.Started, agent.Decision, agent.Plan, agent.Progress, agent.ToolCall, agent.Progress, agent.Text, agent.Completed}
+	if !reflect.DeepEqual(types, want) {
+		t.Fatalf("audit event types = %#v, want %#v", types, want)
+	}
+}
+
 func TestRunUsesConfiguredWorkerRunner(t *testing.T) {
 	service, _ := newTestService()
 	runner := &recordingRunner{result: "runner result"}
@@ -137,9 +155,214 @@ func TestRunUsesConfiguredWorkerRunner(t *testing.T) {
 	if call.IdempotencyKey == "" || call.Input["message"] == "" {
 		t.Fatalf("worker request lost execution context: %#v", call)
 	}
+	if call.Deadline.IsZero() || time.Until(call.Deadline) <= 0 {
+		t.Fatalf("runner request lost fixed deadline: %#v", call)
+	}
 	events := service.Events(runID)
 	if events[len(events)-1].Type != agent.Completed || events[len(events)-2].Data["content"] != "runner result" {
 		t.Fatalf("runner result was not projected: %#v", events)
+	}
+}
+
+func TestWorkerRunnerReceivesCancellationContext(t *testing.T) {
+	service, _ := newTestService()
+	runner := &cancelAwareRunner{}
+	service.deps.Runner = runner
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runID, err := service.Start(ctx, request("run-canceled-before-call", "分析示例用户分群"))
+	var runErr *Error
+	if !errors.As(err, &runErr) || runErr.Code != agent.ErrorCanceled {
+		t.Fatalf("expected cooperative cancellation, got %v", err)
+	}
+	if runner.calls != 0 || terminalCount(service.Events(runID)) != 1 {
+		t.Fatalf("runner was called after cancellation: calls=%d events=%#v", runner.calls, service.Events(runID))
+	}
+}
+
+func TestEndpointCancelStopsInFlightRunnerAndEmitsOneCanceledEvent(t *testing.T) {
+	service, _ := newTestService()
+	runner := &blockingRunner{started: make(chan struct{})}
+	service.deps.Runner = runner
+	result := make(chan error, 1)
+	go func() {
+		_, err := service.Start(context.Background(), request("run-cancel-in-flight", "分析示例用户分群"))
+		result <- err
+	}()
+	select {
+	case <-runner.started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	if err := service.Cancel(context.Background(), testSubject(), "run-cancel-in-flight"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err == nil {
+		t.Fatal("start should report cancellation")
+	}
+	events := service.Events("run-cancel-in-flight")
+	if runner.canceled == 0 || terminalCount(events) != 1 || events[len(events)-1].Type != agent.Canceled {
+		t.Fatalf("in-flight cancellation was not observed: canceled=%d events=%#v", runner.canceled, events)
+	}
+}
+
+func TestUnknownRunnerOutcomeWaitsForReconciliationAndNeverRetries(t *testing.T) {
+	service, _ := newTestService()
+	runner := &unknownOutcomeRunner{}
+	service.deps.Runner = runner
+	runID, err := service.Start(context.Background(), request("run-unknown-outcome", "分析示例用户分群"))
+	var runErr *Error
+	if !errors.As(err, &runErr) || runErr.Code != agent.ErrorOutcomeUnknown {
+		t.Fatalf("expected unknown outcome, got %v", err)
+	}
+	if runner.calls != 1 || !hasEvent(service.Events(runID), agent.ReconciliationRequired) {
+		t.Fatalf("unknown outcome was not recorded: calls=%d events=%#v", runner.calls, service.Events(runID))
+	}
+	if _, err := service.Resume(context.Background(), testSubject(), runID); !errors.As(err, &runErr) || runErr.Code != agent.ErrorOutcomeUnknown {
+		t.Fatalf("resume should remain reconciliation-gated, got %v", err)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("resume retried unknown external call: calls=%d", runner.calls)
+	}
+}
+
+func TestKnownPreCallFailureRetriesWithinBudget(t *testing.T) {
+	service, _ := newTestService()
+	runner := &preCallRunner{}
+	service.deps.Runner = runner
+	service.deps.Budget = application.ExecutionBudget{MaxPlanSteps: 1, MaxToolCalls: 2, MaxRetries: 1, CostBudget: 2, Timeout: time.Second}
+	runID, err := service.Start(context.Background(), request("run-pre-call-retry", "分析示例用户分群"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.calls != 2 || !hasEvent(service.Events(runID), agent.Completed) {
+		t.Fatalf("pre-call failure was not retried once: calls=%d events=%#v", runner.calls, service.Events(runID))
+	}
+}
+
+func TestExecutionPlanRunsStepsInOrderAndHonorsRunBudget(t *testing.T) {
+	steps := []agent.PlanStep{
+		{StepID: "step-1", WorkerID: "user_analysis", Intent: "query", ToolID: "user_query", Input: map[string]string{"message": "first"}, Status: agent.StepPending, IdempotencyKey: "run-multi:step-1"},
+		{StepID: "step-2", WorkerID: "user_analysis", Intent: "query", ToolID: "user_query", Input: map[string]string{"message": "second"}, Status: agent.StepPending, IdempotencyKey: "run-multi:step-2"},
+	}
+	service, plan := prepareExecutionPlan(t, "run-multi", steps, application.ExecutionBudget{MaxPlanSteps: 2, MaxToolCalls: 2, MaxRetries: 0, CostBudget: 2, Timeout: time.Second})
+	runner := &sequenceRunner{}
+	service.deps.Runner = runner
+	service.mu.Lock()
+	err := service.executeLocked(context.Background(), plan)
+	service.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 2 || runner.requests[0].Input["message"] != "first" || runner.requests[1].Input["message"] != "second" {
+		t.Fatalf("steps were not executed in order: %#v", runner.requests)
+	}
+	if terminalCount(service.Events("run-multi")) != 1 {
+		t.Fatalf("expected exactly one terminal event: %#v", service.Events("run-multi"))
+	}
+
+	limited, limitedPlan := prepareExecutionPlan(t, "run-budget-multi", steps, application.ExecutionBudget{MaxPlanSteps: 2, MaxToolCalls: 1, MaxRetries: 2, CostBudget: 2, Timeout: time.Second})
+	limitedRunner := &sequenceRunner{}
+	limited.deps.Runner = limitedRunner
+	limited.mu.Lock()
+	err = limited.executeLocked(context.Background(), limitedPlan)
+	limited.mu.Unlock()
+	var runErr *Error
+	if !errors.As(err, &runErr) || runErr.Code != agent.ErrorBudgetExceeded {
+		t.Fatalf("expected run-level call budget failure, got %v", err)
+	}
+	if len(limitedRunner.requests) != 1 || terminalCount(limited.Events("run-budget-multi")) != 1 {
+		t.Fatalf("budget was not enforced across steps: calls=%d events=%#v", len(limitedRunner.requests), limited.Events("run-budget-multi"))
+	}
+}
+
+func TestWorkerReceivesBoundedScopedMemoryWithoutChangingPlanAuthority(t *testing.T) {
+	service, _ := newTestService()
+	store := meminfra.NewStore()
+	service.deps.MemoryStore = store
+	service.deps.MemoryRead = store
+	subject := testSubject()
+	scope := conversation.MemoryScope{TenantID: subject.TenantID, SubjectID: subject.SubjectID, ConversationID: "demo", Kind: conversation.MemoryWorking}
+	if _, err := store.Append(context.Background(), scope, conversation.MemoryEntry{MemoryID: "memory-1", Scope: scope, Content: "relevant context"}); err != nil {
+		t.Fatal(err)
+	}
+	foreign := scope
+	foreign.SubjectID = "other-user"
+	if _, err := store.Append(context.Background(), foreign, conversation.MemoryEntry{MemoryID: "memory-2", Scope: foreign, Content: "foreign context"}); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{result: "done"}
+	service.deps.Runner = runner
+	runID, err := service.Start(context.Background(), request("run-memory", "分析示例用户分群"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 1 || len(runner.requests[0].Memories) != 1 || runner.requests[0].Memories[0].Content != "relevant context" {
+		t.Fatalf("wrong memory scope or recall limit: %#v", runner.requests)
+	}
+	plan, ok := service.deps.Repository.GetPlan(runID)
+	if !ok || plan.Status != agent.RunCompleted || len(plan.Steps) != 1 || plan.Steps[0].ToolID != "user_query" {
+		t.Fatalf("memory altered plan authority: %#v", plan)
+	}
+}
+
+func prepareExecutionPlan(t *testing.T, runID string, steps []agent.PlanStep, budget application.ExecutionBudget) (*Service, agent.ExecutionPlan) {
+	t.Helper()
+	service, _ := newTestService()
+	if err := service.deps.Repository.SaveRequest(request(runID, "test")); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := agent.NewExecutionPlan(runID+":plan", runID, steps, budget.MaxPlanSteps, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.deps.Repository.SavePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	service.deps.Budget = budget
+	service.mu.Lock()
+	if err := service.emitLocked(runID, agent.Started, map[string]string{"conversation_id": "demo"}); err != nil {
+		service.mu.Unlock()
+		t.Fatal(err)
+	}
+	service.mu.Unlock()
+	return service, plan
+}
+
+func TestPreCallFailureStopsAtCallAndCostBudget(t *testing.T) {
+	service, _ := newTestService()
+	runner := &alwaysPreCallRunner{}
+	service.deps.Runner = runner
+	service.deps.Budget = application.ExecutionBudget{MaxPlanSteps: 1, MaxToolCalls: 1, MaxRetries: 5, CostBudget: 1, Timeout: time.Second}
+	runID, err := service.Start(context.Background(), request("run-budget", "分析示例用户分群"))
+	var runErr *Error
+	if !errors.As(err, &runErr) || runErr.Code != agent.ErrorBudgetExceeded {
+		t.Fatalf("expected budget rejection, got %v", err)
+	}
+	if runner.calls != 1 || !hasEvent(service.Events(runID), agent.Failed) {
+		t.Fatalf("budget allowed extra call: calls=%d events=%#v", runner.calls, service.Events(runID))
+	}
+}
+
+func TestResumeRepairsMissingTerminalEventOnce(t *testing.T) {
+	service, _ := newTestService()
+	store := &repairingEventStore{}
+	service.deps.EventBus = store
+	runID, err := service.Start(context.Background(), request("run-repair-terminal", "分析示例用户分群"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasEvent(store.Events(runID), agent.Completed) {
+		t.Fatal("test store unexpectedly retained terminal event")
+	}
+	if _, err := service.Resume(context.Background(), testSubject(), runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Resume(context.Background(), testSubject(), runID); err != nil {
+		t.Fatal(err)
+	}
+	if terminalCount(store.Events(runID)) != 1 {
+		t.Fatalf("terminal repair was not idempotent: %#v", store.Events(runID))
 	}
 }
 
@@ -165,6 +388,28 @@ func TestApprovalBlocksSideEffectAndRepeatedResumeIsIdempotent(t *testing.T) {
 	}
 	if tools.OutreachCount() != 1 || terminalCount(service.Events(runID)) != 1 {
 		t.Fatalf("idempotency failed: count=%d events=%#v", tools.OutreachCount(), service.Events(runID))
+	}
+}
+
+func TestSideEffectRunEmitsApprovalAuditSequence(t *testing.T) {
+	service, _ := newTestService()
+	runID, err := service.Start(context.Background(), request("run-approval-audit", "模拟触达示例用户"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Approve(context.Background(), testSubject(), runID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Resume(context.Background(), testSubject(), runID); err != nil {
+		t.Fatal(err)
+	}
+	var types []agent.EventType
+	for _, event := range service.Events(runID) {
+		types = append(types, event.Type)
+	}
+	want := []agent.EventType{agent.Started, agent.Decision, agent.Plan, agent.ApprovalRequired, agent.Progress, agent.ToolCall, agent.Progress, agent.Text, agent.Completed}
+	if !reflect.DeepEqual(types, want) {
+		t.Fatalf("approval audit event types = %#v, want %#v", types, want)
 	}
 }
 
@@ -294,6 +539,79 @@ type fixedTool struct{ result string }
 type recordingRunner struct {
 	requests []application.WorkerRequest
 	result   string
+}
+
+type sequenceRunner struct{ requests []application.WorkerRequest }
+
+func (r *sequenceRunner) Run(_ context.Context, request application.WorkerRequest) (application.WorkerResult, error) {
+	r.requests = append(r.requests, request)
+	return application.WorkerResult{Content: request.Input["message"] + " result"}, nil
+}
+
+type cancelAwareRunner struct{ calls int }
+
+type preCallRunner struct{ calls int }
+
+func (r *preCallRunner) Run(context.Context, application.WorkerRequest) (application.WorkerResult, error) {
+	r.calls++
+	if r.calls == 1 {
+		return application.WorkerResult{}, &application.PreCallError{Err: errors.New("not started")}
+	}
+	return application.WorkerResult{Content: "retry succeeded"}, nil
+}
+
+type alwaysPreCallRunner struct{ calls int }
+
+func (r *alwaysPreCallRunner) Run(context.Context, application.WorkerRequest) (application.WorkerResult, error) {
+	r.calls++
+	return application.WorkerResult{}, &application.PreCallError{Err: errors.New("not started")}
+}
+
+type blockingRunner struct {
+	started  chan struct{}
+	canceled int
+}
+
+func (r *blockingRunner) Run(ctx context.Context, _ application.WorkerRequest) (application.WorkerResult, error) {
+	close(r.started)
+	<-ctx.Done()
+	r.canceled++
+	return application.WorkerResult{}, ctx.Err()
+}
+
+func (r *cancelAwareRunner) Run(ctx context.Context, _ application.WorkerRequest) (application.WorkerResult, error) {
+	r.calls++
+	return application.WorkerResult{}, ctx.Err()
+}
+
+type unknownOutcomeRunner struct{ calls int }
+
+func (r *unknownOutcomeRunner) Run(context.Context, application.WorkerRequest) (application.WorkerResult, error) {
+	r.calls++
+	return application.WorkerResult{}, &application.OutcomeUnknownError{Err: errors.New("commit uncertain")}
+}
+
+type repairingEventStore struct {
+	events          map[string][]agent.RunEvent
+	droppedTerminal bool
+}
+
+func (s *repairingEventStore) Append(event agent.RunEvent) (agent.RunEvent, error) {
+	if s.events == nil {
+		s.events = make(map[string][]agent.RunEvent)
+	}
+	if event.Type == agent.Completed && !s.droppedTerminal {
+		s.droppedTerminal = true
+		return event, nil
+	}
+	items := s.events[event.RunID]
+	event.Sequence = int64(len(items) + 1)
+	s.events[event.RunID] = append(items, event)
+	return event, nil
+}
+
+func (s *repairingEventStore) Events(runID string) []agent.RunEvent {
+	return append([]agent.RunEvent(nil), s.events[runID]...)
 }
 
 func (r *recordingRunner) Run(_ context.Context, request application.WorkerRequest) (application.WorkerResult, error) {

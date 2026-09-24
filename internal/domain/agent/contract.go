@@ -21,28 +21,45 @@ const (
 type RunStatus string
 
 const (
-	RunPending         RunStatus = "pending"
-	RunRunning         RunStatus = "running"
-	RunWaitingApproval RunStatus = "waiting_approval"
-	RunCompleted       RunStatus = "completed"
-	RunFailed          RunStatus = "failed"
-	RunCanceled        RunStatus = "canceled"
+	RunPending               RunStatus = "pending"
+	RunRunning               RunStatus = "running"
+	RunWaitingApproval       RunStatus = "waiting_approval"
+	RunWaitingReconciliation RunStatus = "waiting_reconciliation"
+	RunCompleted             RunStatus = "completed"
+	RunFailed                RunStatus = "failed"
+	RunCanceled              RunStatus = "canceled"
 )
 
 // StepStatus 表示单个计划步骤的状态。
 type StepStatus string
 
 const (
-	StepPending         StepStatus = "pending"
-	StepRunning         StepStatus = "running"
-	StepSucceeded       StepStatus = "succeeded"
-	StepFailed          StepStatus = "failed"
-	StepWaitingApproval StepStatus = "waiting_approval"
-	StepCanceled        StepStatus = "canceled"
+	StepPending               StepStatus = "pending"
+	StepRunning               StepStatus = "running"
+	StepSucceeded             StepStatus = "succeeded"
+	StepFailed                StepStatus = "failed"
+	StepWaitingApproval       StepStatus = "waiting_approval"
+	StepWaitingReconciliation StepStatus = "waiting_reconciliation"
+	StepCanceled              StepStatus = "canceled"
 )
 
 // ErrorCode 是可公开分类的稳定错误码。
 type ErrorCode string
+
+// ErrorClass is the stable cross-adapter classification of a failed operation.
+type ErrorClass string
+
+const (
+	ClassPreCallFailure ErrorClass = "pre_call_failure"
+	ClassTimeout        ErrorClass = "timeout"
+	ClassCanceled       ErrorClass = "canceled"
+	ClassInvalidOutput  ErrorClass = "invalid_output"
+	ClassPolicyDenied   ErrorClass = "policy_denied"
+	ClassBusiness       ErrorClass = "business_failure"
+	ClassUnavailable    ErrorClass = "unavailable"
+	ClassUnknownOutcome ErrorClass = "unknown_outcome"
+	ClassInternal       ErrorClass = "internal"
+)
 
 const (
 	ErrorUnknownCapability ErrorCode = "UNKNOWN_CAPABILITY"
@@ -57,6 +74,7 @@ const (
 	ErrorRunNotResumable   ErrorCode = "RUN_NOT_RESUMABLE"
 	ErrorUnauthenticated   ErrorCode = "UNAUTHENTICATED"
 	ErrorAccessDenied      ErrorCode = "ACCESS_DENIED"
+	ErrorOutcomeUnknown    ErrorCode = "RUN_OUTCOME_UNKNOWN"
 )
 
 // SupervisorDecision 是模型或 Supervisor 提出的候选路由，不代表授权结果。
@@ -88,6 +106,9 @@ type PlanStep struct {
 	Status         StepStatus
 	Attempts       int
 	IdempotencyKey string
+	ResultDigest   string
+	ResultContent  string
+	AttemptStatus  string
 }
 
 // ExecutionPlan 是 Manager 所有的有界执行计划。
@@ -111,6 +132,16 @@ func NewExecutionPlan(planID, runID string, steps []PlanStep, maxSteps int, dead
 			return ExecutionPlan{}, errors.New("执行计划包含非法步骤")
 		}
 	}
+	steps = append([]PlanStep(nil), steps...)
+	for i := range steps {
+		if steps[i].Input != nil {
+			input := make(map[string]string, len(steps[i].Input))
+			for key, value := range steps[i].Input {
+				input[key] = value
+			}
+			steps[i].Input = input
+		}
+	}
 	return ExecutionPlan{PlanID: planID, RunID: runID, Steps: steps, MaxSteps: maxSteps, Deadline: deadline, Status: RunPending}, nil
 }
 
@@ -130,6 +161,9 @@ func (p *ExecutionPlan) TransitionStep(stepID string, next StepStatus) error {
 		}
 		if next == StepWaitingApproval {
 			p.Status = RunWaitingApproval
+		}
+		if next == StepWaitingReconciliation {
+			p.Status = RunWaitingReconciliation
 		}
 		if next == StepFailed {
 			p.Status = RunFailed
@@ -177,9 +211,11 @@ func validStepTransition(current, next StepStatus) bool {
 	case StepPending:
 		return next == StepRunning || next == StepWaitingApproval || next == StepCanceled
 	case StepRunning:
-		return next == StepSucceeded || next == StepFailed || next == StepCanceled
+		return next == StepSucceeded || next == StepFailed || next == StepCanceled || next == StepWaitingReconciliation
 	case StepWaitingApproval:
 		return next == StepRunning || next == StepFailed || next == StepCanceled
+	case StepWaitingReconciliation:
+		return false
 	default:
 		return false
 	}

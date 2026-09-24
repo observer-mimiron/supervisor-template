@@ -34,7 +34,7 @@ func (s *MemoryStore) Save(snapshot agent.Checkpoint) (agent.Checkpoint, error) 
 	} else if snapshot.Version != 1 {
 		return agent.Checkpoint{}, errors.New("首个 checkpoint 版本必须为 1")
 	}
-	s.items[snapshot.RunID] = snapshot
+	s.items[snapshot.RunID] = cloneCheckpoint(snapshot)
 	return snapshot, nil
 }
 
@@ -43,5 +43,5 @@ func (s *MemoryStore) Get(runID string) (agent.Checkpoint, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	snapshot, ok := s.items[runID]
-	return snapshot, ok
+	return cloneCheckpoint(snapshot), ok
 }

@@ -9,16 +9,17 @@ import "time"
 type EventType string
 
 const (
-	Started          EventType = "started"
-	Decision         EventType = "decision"
-	Plan             EventType = "plan"
-	Progress         EventType = "progress"
-	ToolCall         EventType = "tool_call"
-	ApprovalRequired EventType = "approval_required"
-	Text             EventType = "text"
-	Completed        EventType = "completed"
-	Failed           EventType = "failed"
-	Canceled         EventType = "canceled"
+	Started                EventType = "started"
+	Decision               EventType = "decision"
+	Plan                   EventType = "plan"
+	Progress               EventType = "progress"
+	ToolCall               EventType = "tool_call"
+	ApprovalRequired       EventType = "approval_required"
+	ReconciliationRequired EventType = "reconciliation_required"
+	Text                   EventType = "text"
+	Completed              EventType = "completed"
+	Failed                 EventType = "failed"
+	Canceled               EventType = "canceled"
 )
 
 // RunEvent 是可重放的内部运行事件；公开投影不得包含敏感原文。

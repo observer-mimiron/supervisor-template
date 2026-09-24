@@ -26,3 +26,13 @@ func TestExecutionPlanRejectsInvalidTransitionAndProtectsTerminal(t *testing.T) 
 		t.Fatal("expected terminal overwrite rejection")
 	}
 }
+
+func TestErrorClassNamesAreStable(t *testing.T) {
+	want := []string{"pre_call_failure", "timeout", "canceled", "invalid_output", "policy_denied", "business_failure", "unavailable", "unknown_outcome", "internal"}
+	got := []ErrorClass{ClassPreCallFailure, ClassTimeout, ClassCanceled, ClassInvalidOutput, ClassPolicyDenied, ClassBusiness, ClassUnavailable, ClassUnknownOutcome, ClassInternal}
+	for i, class := range got {
+		if string(class) != want[i] {
+			t.Fatalf("ErrorClass[%d] = %q, want %q", i, class, want[i])
+		}
+	}
+}

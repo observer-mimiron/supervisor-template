@@ -60,22 +60,32 @@ func (t *HTTPReadOnlyTool) Execute(ctx context.Context, input map[string]string)
 	request.Header.Set("User-Agent", "eino-supervisor-template/1")
 	response, err := t.client.Do(request)
 	if err != nil {
-		return "", err
+		kind := FailureUnavailable
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			kind = FailureTimeout
+		} else if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			kind = FailureCanceled
+		}
+		return "", &InvocationFailure{Kind: kind, Err: err}
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("只读 Tool 返回 HTTP %d", response.StatusCode)
+		kind := FailureBusiness
+		if response.StatusCode >= http.StatusInternalServerError {
+			kind = FailureUnavailable
+		}
+		return "", &InvocationFailure{Kind: kind, Err: fmt.Errorf("只读 Tool 返回 HTTP %d", response.StatusCode)}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxReadOnlyBodyBytes+1))
 	if err != nil {
-		return "", errors.New("读取只读 Tool 响应失败")
+		return "", &InvocationFailure{Kind: FailureUnavailable, Err: errors.New("读取只读 Tool 响应失败")}
 	}
 	if len(body) > maxReadOnlyBodyBytes {
-		return "", errors.New("只读 Tool 响应超过大小限制")
+		return "", &InvocationFailure{Kind: FailureInvalidOutput, Err: errors.New("只读 Tool 响应超过大小限制")}
 	}
 	result := strings.TrimSpace(string(body))
 	if result == "" {
-		return "", errors.New("只读 Tool 响应为空")
+		return "", &InvocationFailure{Kind: FailureInvalidOutput, Err: errors.New("只读 Tool 响应为空")}
 	}
 	return result, nil
 }

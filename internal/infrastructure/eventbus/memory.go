@@ -15,16 +15,17 @@ type EventType = agent.EventType
 type RunEvent = agent.RunEvent
 
 const (
-	Started          = agent.Started
-	Decision         = agent.Decision
-	Plan             = agent.Plan
-	Progress         = agent.Progress
-	ToolCall         = agent.ToolCall
-	ApprovalRequired = agent.ApprovalRequired
-	Text             = agent.Text
-	Completed        = agent.Completed
-	Failed           = agent.Failed
-	Canceled         = agent.Canceled
+	Started                = agent.Started
+	Decision               = agent.Decision
+	Plan                   = agent.Plan
+	Progress               = agent.Progress
+	ToolCall               = agent.ToolCall
+	ApprovalRequired       = agent.ApprovalRequired
+	ReconciliationRequired = agent.ReconciliationRequired
+	Text                   = agent.Text
+	Completed              = agent.Completed
+	Failed                 = agent.Failed
+	Canceled               = agent.Canceled
 )
 
 // MemoryBus 为每个 run 维护单调序列和事件列表。
@@ -44,6 +45,11 @@ func (b *MemoryBus) Append(event RunEvent) (RunEvent, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	items := b.events[event.RunID]
+	for _, existing := range items {
+		if existing.EventID == event.EventID {
+			return existing, nil
+		}
+	}
 	expected := int64(len(items) + 1)
 	if event.Sequence == 0 {
 		event.Sequence = expected
@@ -58,6 +64,9 @@ func (b *MemoryBus) Append(event RunEvent) (RunEvent, error) {
 			}
 		}
 	}
+	if event.Data != nil {
+		event.Data = cloneData(event.Data)
+	}
 	b.events[event.RunID] = append(items, event)
 	return event, nil
 }
@@ -67,7 +76,22 @@ func (b *MemoryBus) Events(runID string) []RunEvent {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	items := b.events[runID]
-	return append([]RunEvent(nil), items...)
+	cloned := make([]RunEvent, len(items))
+	for index, event := range items {
+		if event.Data != nil {
+			event.Data = cloneData(event.Data)
+		}
+		cloned[index] = event
+	}
+	return cloned
+}
+
+func cloneData(values map[string]string) map[string]string {
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 // TerminalStatus 将终态事件映射回运行状态。

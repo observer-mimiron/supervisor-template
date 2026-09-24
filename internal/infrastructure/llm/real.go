@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -94,15 +95,7 @@ func (s *RealSupervisor) Decide(ctx context.Context, request conversation.Execut
 // parseDecision 只接受 SupervisorDecision Schema 的最小 JSON，并拒绝含糊的自然语言输出。
 func parseDecision(raw string) (agent.SupervisorDecision, error) {
 	raw = strings.TrimSpace(raw)
-	if strings.HasPrefix(raw, "```") {
-		raw = strings.TrimPrefix(raw, "```")
-		if index := strings.IndexByte(raw, '\n'); index >= 0 {
-			raw = raw[index+1:]
-		}
-		raw = strings.TrimSuffix(strings.TrimSpace(raw), "```")
-	}
-	start, end := strings.IndexByte(raw, '{'), strings.LastIndexByte(raw, '}')
-	if start < 0 || end < start {
+	if raw == "" {
 		return agent.SupervisorDecision{}, errors.New("真实模型输出不是合法 JSON")
 	}
 	var payload struct {
@@ -113,10 +106,17 @@ func parseDecision(raw string) (agent.SupervisorDecision, error) {
 		Risk       agent.Risk        `json:"risk"`
 		Confidence float64           `json:"confidence"`
 	}
-	decoder := json.NewDecoder(strings.NewReader(raw[start : end+1]))
+	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&payload); err != nil {
 		return agent.SupervisorDecision{}, fmt.Errorf("解析真实模型路由失败: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return agent.SupervisorDecision{}, errors.New("真实模型输出包含额外 JSON")
+		}
+		return agent.SupervisorDecision{}, fmt.Errorf("真实模型输出包含额外内容: %w", err)
 	}
 	if payload.DecisionID == "" || payload.WorkerID == "" || payload.Intent == "" || payload.Arguments == nil || payload.Arguments["tool_id"] == "" {
 		return agent.SupervisorDecision{}, errors.New("真实模型路由缺少必要字段")

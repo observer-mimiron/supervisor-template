@@ -9,6 +9,7 @@ import (
 
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 )
 
 // FakeRoute 是 fake Supervisor 使用的配置路由快照。
@@ -27,6 +28,17 @@ type FakeSupervisor struct {
 
 // NewFakeSupervisor 创建确定性 fake Supervisor。
 func NewFakeSupervisor(routes ...FakeRoute) *FakeSupervisor {
+	if len(routes) == 0 {
+		for _, route := range examplebusiness.Routes() {
+			routes = append(routes, FakeRoute{
+				WorkerID: route.WorkerID,
+				Intent:   route.Intent,
+				Matches:  append([]string(nil), route.Matches...),
+				ToolID:   route.ToolID,
+				Risk:     route.Risk,
+			})
+		}
+	}
 	cloned := make([]FakeRoute, len(routes))
 	for index, route := range routes {
 		cloned[index] = route
@@ -41,11 +53,7 @@ func (s *FakeSupervisor) Decide(_ context.Context, request conversation.Executio
 	if message == "" {
 		return agent.SupervisorDecision{}, context.Canceled
 	}
-	route := FakeRoute{WorkerID: "user_analysis", Intent: "user_analysis", ToolID: "user_query", Risk: agent.RiskReadOnly}
-	if len(s.routes) == 0 && (strings.Contains(message, "触达") || strings.Contains(message, "发送") || strings.Contains(message, "模拟写入")) {
-		route.ToolID = "simulated_outreach"
-		route.Risk = agent.RiskSideEffect
-	}
+	route := FakeRoute{WorkerID: examplebusiness.WorkerID, Intent: examplebusiness.WorkerID, ToolID: "not_registered", Risk: agent.RiskReadOnly}
 	for _, candidate := range s.routes {
 		matched := false
 		for _, match := range candidate.Matches {

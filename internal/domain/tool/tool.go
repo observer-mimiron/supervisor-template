@@ -14,4 +14,7 @@ type Contract struct {
 	RetryLimit          int
 	RequiresApproval    bool
 	IdempotencyRequired bool
+	RequiredInputs      []string
+	MaxInputBytes       int
+	MaxOutputBytes      int
 }

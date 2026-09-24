@@ -50,6 +50,10 @@ func (p *PolicyGate) Evaluate(decision SupervisorDecision) (ApprovedRoute, error
 	if tool.Risk == string(RiskSideEffect) && decision.Risk != RiskSideEffect {
 		return ApprovedRoute{}, errors.New(string(ErrorPolicyDenied))
 	}
+	// A model may not escalate a read-only capability into a side effect.
+	if decision.Risk == RiskSideEffect && tool.Risk != string(RiskSideEffect) {
+		return ApprovedRoute{}, errors.New(string(ErrorPolicyDenied))
+	}
 	return ApprovedRoute{
 		DecisionID:       decision.DecisionID,
 		WorkerID:         worker.WorkerID,

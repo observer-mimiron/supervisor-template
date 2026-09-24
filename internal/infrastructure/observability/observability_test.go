@@ -125,3 +125,16 @@ func TestSetupExportsTraceAndMetricToLocalOTLPCollector(t *testing.T) {
 		t.Fatalf("collector paths = %#v, want traces and metrics", paths)
 	}
 }
+
+func TestSetupCanRunWithoutExporterAndShutdownIsExplicit(t *testing.T) {
+	runtime, err := Setup(context.Background(), config.ObservabilityConfig{Enabled: true, ServiceName: "test-no-exporter", TraceSampleRate: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime == nil || runtime.tracer == nil {
+		t.Fatal("expected local observability runtime")
+	}
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

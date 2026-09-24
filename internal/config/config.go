@@ -219,6 +219,9 @@ func (c Config) Validate() error {
 			if len(server.AllowedTools) == 0 {
 				return fmt.Errorf("MCP server %q 必须配置工具 allow-list", serverID)
 			}
+			if err := rejectDuplicateIDs(fmt.Sprintf("MCP server %q allowed_tools", serverID), server.AllowedTools); err != nil {
+				return err
+			}
 		}
 	}
 	if strings.TrimSpace(c.Server.ListenAddr) == "" {
@@ -246,6 +249,9 @@ func (c Config) Validate() error {
 		if c.Agent.Supervisor.Implementation != "eino.chat_model_agent" || c.Agent.Supervisor.MaxSteps <= 0 {
 			return errors.New("Supervisor 实现未注册或 max_steps 非法")
 		}
+		if err := rejectDuplicateIDs("Supervisor allowed_workers", c.Agent.Supervisor.AllowedWorkers); err != nil {
+			return err
+		}
 		for _, workerID := range c.Agent.Supervisor.AllowedWorkers {
 			worker, ok := c.Agent.Workers[workerID]
 			if !ok || !worker.Enabled {
@@ -262,6 +268,9 @@ func (c Config) Validate() error {
 		}
 		if worker.Enabled && worker.Timeout <= 0 {
 			return fmt.Errorf("Worker %q timeout 必须大于 0", workerID)
+		}
+		if err := rejectDuplicateIDs(fmt.Sprintf("Worker %q allowed_tools", workerID), worker.AllowedTools); err != nil {
+			return err
 		}
 		for _, toolID := range worker.AllowedTools {
 			tool, ok := c.Tools[toolID]
@@ -405,6 +414,17 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func rejectDuplicateIDs(name string, values []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			return fmt.Errorf("%s 包含重复引用 %q", name, value)
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
 }
 
 // parseDurations 将 TOML 中的可读时间字符串转换成运行时类型。

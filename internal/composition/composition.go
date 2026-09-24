@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
+	appmemory "github.com/observer-mimiron/supervisor-template/internal/application/memory"
 	runapp "github.com/observer-mimiron/supervisor-template/internal/application/run"
 	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
@@ -18,8 +20,10 @@ import (
 	authinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/auth"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/checkpoint"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/eventbus"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/llm"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/mcp"
+	memoryinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/memory"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/observability"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/persistence"
 	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
@@ -31,13 +35,17 @@ type App struct {
 	Authenticator application.Authenticator
 	Health        application.HealthService
 	Run           *runapp.Service
+	Memory        appmemory.Store
 	Close         func(context.Context) error
 }
 
 // New 根据已校验配置创建依赖图，并选择内存/文件、fake/真实和 MCP 基础设施实现。
 func New(cfg config.Config) (*App, error) {
-	catalog, err := cfg.CompileCatalog()
+	catalog, err := cfg.CompileRuntimeCatalog()
 	if err != nil {
+		return nil, err
+	}
+	if err := validateExampleBusiness(catalog); err != nil {
 		return nil, err
 	}
 	observation, err := observability.Setup(context.Background(), cfg.Observability)
@@ -53,6 +61,7 @@ func New(cfg config.Config) (*App, error) {
 	var repository application.Repository = persistence.NewMemoryRepository()
 	var checkpoints application.CheckpointStore = checkpoint.NewMemoryStore()
 	var eventStore application.EventStore = eventbus.NewMemoryBus()
+	var memoryStore appmemory.Store = memoryinfra.NewStore()
 	if cfg.Storage.Backend == "file" {
 		repository, err = persistence.NewFileRepository(filepath.Join(cfg.Storage.Dir, "runs"))
 		if err != nil {
@@ -67,14 +76,18 @@ func New(cfg config.Config) (*App, error) {
 			return nil, fileErr
 		}
 		eventStore = fileEvents
+		memoryStore, err = memoryinfra.OpenFileStore(filepath.Join(cfg.Storage.Dir, "memory", "working.json"))
+		if err != nil {
+			return nil, err
+		}
 	}
 	events := observation.WrapEventStore(eventStore)
 	var supervisor application.DecisionProvider
 	switch cfg.Model.Provider {
 	case "fake":
-		supervisor = llm.NewFakeSupervisor(toFakeRoutes(catalog.Routes)...)
+		supervisor = llm.NewFakeSupervisor(toFakeRoutes(catalog.Routes())...)
 	case "deepseek":
-		instruction, readErr := os.ReadFile(catalog.Supervisor.PromptFile)
+		instruction, readErr := os.ReadFile(catalog.Supervisor().PromptFile)
 		if readErr != nil {
 			return nil, fmt.Errorf("读取 Supervisor Prompt 失败: %w", readErr)
 		}
@@ -85,7 +98,7 @@ func New(cfg config.Config) (*App, error) {
 	default:
 		return nil, fmt.Errorf("model provider %q 未注册", cfg.Model.Provider)
 	}
-	userQuery := catalog.Tools["user_query"]
+	userQuery := catalog.Tools()[examplebusiness.ReadOnlyToolID]
 	var mcpClient *mcp.Client
 	if cfg.MCP.Enabled {
 		servers := make(map[string]mcp.Server, len(cfg.MCP.Servers))
@@ -102,7 +115,15 @@ func New(cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("Tool 装配失败: %w", err)
 	}
 	workers := make([]operation.WorkerContract, 0, len(cfg.Agent.Workers))
-	for workerID, worker := range catalog.Workers {
+	limits := catalog.Limits()
+	budget := application.ExecutionBudget{
+		MaxPlanSteps: limits.MaxPlanSteps,
+		MaxToolCalls: limits.MaxToolCalls,
+		MaxRetries:   limits.MaxRetries,
+		CostBudget:   limits.CostBudget,
+		Timeout:      userQuery.Timeout,
+	}
+	for workerID, worker := range catalog.Workers() {
 		if worker.Enabled {
 			workers = append(workers, operation.WorkerContract{
 				WorkerID:       workerID,
@@ -110,21 +131,31 @@ func New(cfg config.Config) (*App, error) {
 				AllowedTools:   append([]string(nil), worker.AllowedTools...),
 				Timeout:        worker.Timeout,
 			})
+			if budget.Timeout <= 0 || (worker.Timeout > 0 && worker.Timeout < budget.Timeout) {
+				budget.Timeout = worker.Timeout
+			}
 		}
+	}
+	if budget.Timeout <= 0 {
+		budget.Timeout = 5 * time.Second
 	}
 	policy := agent.NewPolicyGate(workers, toolinfra.ContractsFor(userQuery.Implementation))
 	authenticator := authinfra.NewStaticBearerAuthenticator(cfg.Auth.Credentials)
 	deps := application.Dependencies{
-		Repository: repository,
-		Checkpoint: checkpoints,
-		EventBus:   events,
-		Supervisor: supervisor,
-		Policy:     policy,
-		RunAuth:    authinfra.OwnerRunAuthorizer{},
-		Runner:     application.SingleToolRunner{Tools: tools},
-		Tools:      tools,
+		Repository:    repository,
+		Checkpoint:    checkpoints,
+		EventBus:      events,
+		Supervisor:    supervisor,
+		Policy:        policy,
+		RunAuth:       authinfra.OwnerRunAuthorizer{},
+		Runner:        application.SingleToolRunner{Tools: tools},
+		Tools:         tools,
+		ToolValidator: tools,
+		MemoryStore:   memoryStore,
+		MemoryRead:    memoryStore,
+		Budget:        budget,
 	}
-	app := &App{Config: cfg, Authenticator: authenticator, Run: runapp.NewService(deps), Health: application.HealthService{Dependencies: deps}, Close: observation.Shutdown}
+	app := &App{Config: cfg, Authenticator: authenticator, Run: runapp.NewService(deps), Memory: memoryStore, Health: application.HealthService{Dependencies: deps}, Close: observation.Shutdown}
 	if !app.Health.Healthy() {
 		return nil, errors.New("应用依赖装配不完整")
 	}
@@ -145,4 +176,30 @@ func toFakeRoutes(routes map[string]config.RouteConfig) []llm.FakeRoute {
 		})
 	}
 	return converted
+}
+
+// validateExampleBusiness confirms that configuration only selects capabilities
+// declared by the explicit example module; it does not create new business IDs.
+func validateExampleBusiness(catalog config.RuntimeCatalog) error {
+	for workerID, worker := range catalog.Workers() {
+		if !worker.Enabled {
+			continue
+		}
+		registered, ok := examplebusiness.WorkerFor(workerID)
+		if !ok || worker.Implementation != registered.Implementation || worker.Runner != registered.Runner || worker.PromptFile != registered.PromptFile {
+			return fmt.Errorf("Worker %q 未在示例业务模块注册", workerID)
+		}
+	}
+	for toolID, tool := range catalog.Tools() {
+		if tool.Enabled && !examplebusiness.ToolImplementationRegistered(toolID, tool.Implementation) {
+			return fmt.Errorf("Tool %q 未在示例业务模块注册", toolID)
+		}
+	}
+	for routeID, route := range catalog.Routes() {
+		registered, ok := examplebusiness.RouteFor(routeID)
+		if !ok || route.WorkerID != registered.WorkerID || route.ToolID != registered.ToolID || route.Intent != registered.Intent || agent.Risk(route.Risk) != registered.Risk {
+			return fmt.Errorf("route %q 未在示例业务模块注册", routeID)
+		}
+	}
+	return nil
 }

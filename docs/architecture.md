@@ -61,7 +61,7 @@ v1 默认使用内存 Repository、内存 checkpoint、fake model 和 fake Tool�
 
 `Gin -> Application -> Eino Supervisor -> fake Worker -> fake Tool -> RunEvent -> SSE`
 
-本轮 M4 已补充 T016 持久化 checkpoint、T017 受控 MCP Tool 和 T018 的最小身份/资源隔离边界；完整 OIDC/JWT、RBAC、组织层级和具体运营业务仍延期。默认认证器只把配置的静态 Bearer 哈希映射为主体，run 资源暂按创建主体隔离。
+本轮 M4 已补充 T016 持久化 checkpoint、T017 受控 MCP Tool、T018 的最小身份/资源隔离边界和 C019-C023 的收敛合同；示例业务模块已集中注册，但真实运营业务、完整 OIDC/JWT、RBAC 和组织层级仍延期。默认认证器只把配置的静态 Bearer 哈希映射为主体，run 资源暂按创建主体隔离。运行时只接受完整结构化 Supervisor JSON，按编译预算限制步骤、调用、重试、成本和 deadline，并在 Tool 输入/输出边界执行注册合同校验；取消通过 per-run context 协作，不承诺强制杀停外部进程。
 
 ## 身份与权限边界
 
@@ -85,4 +85,4 @@ v1 默认使用内存 Repository、内存 checkpoint、fake model 和 fake Tool�
 组件化增量的具体阶段、注册合同、故障边界和开源源码依据见 [脚手架演进先行方案](./scaffold-evolution-plan.md)
 和 [组件参考矩阵](./component-reference-map.md)。`ExecutionPlan` 是业务状态唯一 owner，checkpoint 只做恢复投影，RunEvent 只做事件投影；三者之间没有隐式万能事件总线或跨存储事务假设。
 
-当前实现仍有一项已知偏差：`application/run` 直接执行批准 Tool，尚未通过真实 WorkerRunner；配置中的路由、Prompt、Runner 和部分预算字段也尚未形成统一 Runtime Catalog。该偏差由 [脚手架演进先行方案](./scaffold-evolution-plan.md) 分阶段收敛，不应在文档中提前描述为已完成能力。
+当前实现已通过 `WorkerRunner` 作为应用层执行边界：默认 `SingleToolRunner` 仍只执行一次已批准 Tool，后续可替换为其他 Runner 而不改变运行状态机和 SSE 投影。启动阶段会编译不可变 `RuntimeCatalog`，校验路由、Worker、Prompt、Runner、Tool allow-list 和预算引用；运行期不再读取可变配置 map。示例业务注册集中在 `internal/infrastructure/examplebusiness`，真实运营业务、完整身份平台和 ReAct/Graph DSL 仍属于延期范围。

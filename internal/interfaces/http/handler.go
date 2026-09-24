@@ -198,7 +198,7 @@ func writeEvents(c *gin.Context, events []agent.RunEvent) {
 			RunID:    event.RunID,
 			Sequence: event.Sequence,
 			Type:     event.Type,
-			Data:     event.Data,
+			Data:     redactEventData(event.Data),
 		})
 		if err != nil {
 			writePublicError(c, http.StatusInternalServerError, &run.Error{Code: "INTERNAL_ERROR", Message: "事件投影失败"})
@@ -209,6 +209,25 @@ func writeEvents(c *gin.Context, events []agent.RunEvent) {
 		}
 		c.Writer.Flush()
 	}
+}
+
+func redactEventData(data map[string]string) map[string]string {
+	if data == nil {
+		return nil
+	}
+	redacted := make(map[string]string, len(data))
+	for key, value := range data {
+		lowerKey := strings.ToLower(key)
+		lowerValue := strings.ToLower(value)
+		if strings.Contains(lowerKey, "token") || strings.Contains(lowerKey, "secret") ||
+			strings.Contains(lowerKey, "authorization") || strings.Contains(lowerKey, "prompt") ||
+			strings.Contains(lowerKey, "stack") || strings.Contains(lowerKey, "path") ||
+			strings.Contains(lowerValue, "bearer ") || strings.Contains(lowerValue, "stack trace") {
+			continue
+		}
+		redacted[key] = value
+	}
+	return redacted
 }
 
 // hasTerminalEvent 判断恢复失败是否已经保存了可重放的终态事件。
@@ -253,7 +272,8 @@ func statusFor(err error) int {
 			return http.StatusConflict
 		case agent.ErrorRunNotResumable:
 			return http.StatusNotFound
-		case agent.ErrorPolicyDenied:
+		case agent.ErrorPolicyDenied, agent.ErrorUnknownCapability:
+			return http.StatusForbidden
 		case agent.ErrorAccessDenied:
 			return http.StatusForbidden
 		case agent.ErrorUnauthenticated:
@@ -262,6 +282,14 @@ func statusFor(err error) int {
 			return http.StatusGatewayTimeout
 		case agent.ErrorCanceled:
 			return http.StatusConflict
+		case agent.ErrorOutcomeUnknown:
+			return http.StatusConflict
+		case agent.ErrorInvalidState:
+			return http.StatusConflict
+		case agent.ErrorBudgetExceeded:
+			return http.StatusTooManyRequests
+		case agent.ErrorInvalidOutput:
+			return http.StatusBadGateway
 		}
 	}
 	return http.StatusInternalServerError

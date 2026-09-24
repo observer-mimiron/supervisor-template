@@ -22,6 +22,7 @@ Go 标准库和仓库已有依赖，不复制上游代码。
 | 边界 | 锚点版本/来源 | 具体源码区域 | 借鉴规则 | 本地合同测试 |
 | --- | --- | --- | --- | --- |
 | Catalog/显式注册 | `suanming-agent` `850e553113232eaad6b183e63ed04b9fbb3fcd85` | `backend/internal/agentconfig/catalog.go`、`catalog_test.go`、`docs/architecture.md` | 启动加载、重复 ID/缺失引用拒绝、配置只引用 Go 已注册能力 | `internal/config/catalog_test.go`、`internal/composition/composition_test.go` |
+| 示例业务模块 | R1 Catalog + R6 Tool 合同；本地 `internal/infrastructure/examplebusiness` | `registry.go`、`registry_test.go` | Worker、Route、Prompt、Tool 绑定集中声明；composition 启动拒绝未注册引用；描述返回副本 | `internal/infrastructure/examplebusiness/registry_test.go`、`internal/composition/composition_test.go` |
 | 配置加载 | `BurntSushi/toml` v1.4.0 + 当前配置合同 | `internal/config/config.go`、`config_test.go` | 文件 -> 环境覆盖 -> 启动校验；配置不能扩大权限 | `internal/config/config_test.go` |
 | Supervisor/Runner | [Eino](https://github.com/cloudwego/eino/tree/b9539ec114a14c32aa568f05eda5cde1e83fcfc1) | `adk.Runner`、`AgentEvent`、`compose` | Context、事件和 checkpoint 是适配边界；Eino 类型不进入 domain | `internal/application/run/service_test.go`、`internal/infrastructure/eino/eino_test.go` |
 | Tool/MCP | [Eino](https://github.com/cloudwego/eino/tree/b9539ec114a14c32aa568f05eda5cde1e83fcfc1)、[MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk/tree/07e46a2864f7bbc873490a7bb227977450683ab2) | Eino `components/tool`；MCP `client.go`/`tool.go` | 本地注册表拥有 allow-list；远端不能扩大权限或动态注入 Tool | `internal/infrastructure/tool/*_test.go`、`internal/infrastructure/mcp/*_test.go` |
@@ -40,6 +41,18 @@ Go 标准库和仓库已有依赖，不复制上游代码。
 | 进程内授权 | [Casbin](https://github.com/apache/casbin/tree/524f3f2dc9baef696d748db491d49b3055d359d1)，`524f3f2dc9baef696d748db491d49b3055d359d1`，Apache-2.0 | `enforcer.go`、`model/`、`persist/` | 需要可配置 RBAC/ABAC 且仍在进程内 | 不替代 Tool 风险 Policy Gate |
 | 策略评估 | [OPA](https://github.com/open-policy-agent/opa/tree/733bdf9b7ab74da06102f0d55747ec9e64337a41)，`733bdf9b7ab74da06102f0d55747ec9e64337a41`，Apache-2.0 | `ast/`、`topdown/`、`plugins/` | 策略需要独立发布、审计或跨服务复用 | 不把 Rego 作为状态机和终态规则 |
 | 关系授权 | [OpenFGA](https://github.com/openfga/openfga/tree/ab557c5592670c899de35297e7aa067015f06502)，`ab557c5592670c899de35297e7aa067015f06502`，许可证需引入前复核 | `check/`、`graph/`、`model/`、`storage/` | 资源关系超过简单 owner 检查 | 不在当前单主体、单进程范围引入服务端授权系统 |
+
+## Coze Studio 参考（只借鉴边界）
+
+| 公开参考 | 可借鉴 | 本项目采用 | 明确不搬运 |
+| --- | --- | --- | --- |
+| [Coze Studio README](https://github.com/coze-dev/coze-studio) | Model/Agent/Workflow/Plugin/Knowledge/Memory/API 的能力分层；Go/DDD + Eino runtime 方向 | M5-M8 的应用 Port 与 infrastructure adapter 分层 | 完整微服务、App/Marketplace、全量存储和商业多租户 |
+| [Workflow Node Types](https://github.com/coze-dev/coze-studio/wiki/11.-Add-new-workflow-node-types-(backend)) | 配置 Schema 与运行时 Schema 分离、Node Adapter/Builder、输入输出合同 | `PlanStep`、`WorkerRunner`、`ToolInvoker` 合同 | 可视化画布、Coze DSL、前端编辑态结构进入 domain |
+| [Plugin Configuration](https://github.com/coze-dev/coze-studio/wiki/4.-Plugin-Configuration) | 显式注册、认证信息、OAuth 和资源生命周期边界 | `ToolCatalog`/`ToolPool`、`Authenticator`、`RunAuthorizer` | 动态插件发现、插件市场、远程 endpoint 扩权 |
+
+Coze 的组件只能作为公开架构参考；本节链接跟随官方文档主分支，尚未形成运行时依赖，真正
+引入任何上游代码前必须重新固定 commit、核验许可证和安全公告，并补充本地合同测试。
+Tool endpoint allow-list、沙箱和资源授权不可由模型或远端插件绕过。
 
 ## 映射规则
 

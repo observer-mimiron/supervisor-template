@@ -27,6 +27,56 @@ func TestNewBuildsHealthyMemoryGraph(t *testing.T) {
 	}
 }
 
+func TestNewRejectsMissingRuntimePromptReference(t *testing.T) {
+	cfg, err := loadExampleConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Agent.Supervisor.PromptFile = ""
+	if _, err := New(cfg); err == nil {
+		t.Fatal("expected startup registration failure")
+	}
+}
+
+func TestNewRejectsBusinessCapabilityOutsideExplicitModule(t *testing.T) {
+	cfg, err := loadExampleConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tools["extra_tool"] = config.ToolConfig{
+		Enabled: true, Implementation: "fake.user_query", Risk: "read_only", Timeout: cfg.Tools["user_query"].Timeout,
+	}
+	if _, err := New(cfg); err == nil {
+		t.Fatal("expected unregistered business tool rejection")
+	}
+}
+
+func TestNewUsesStartupCatalogSnapshot(t *testing.T) {
+	cfg, err := loadExampleConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.Close != nil {
+		defer app.Close(context.Background())
+	}
+	cfg.Tools["user_query"] = config.ToolConfig{Enabled: true, Implementation: "unknown", Risk: "read_only"}
+	runID, err := app.Run.Start(context.Background(), conversation.ExecutionRequest{
+		RunID: "catalog-snapshot", ConversationID: "conversation-1",
+		Subject: identity.Subject{TenantID: "test-tenant", SubjectID: "test-user"}, Message: "分析示例用户分群",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := app.Run.Events(runID)
+	if len(events) == 0 || events[len(events)-1].Type != agent.Completed {
+		t.Fatalf("runtime changed after startup: %#v", events)
+	}
+}
+
 func TestNewRoutesConfiguredHTTPReadOnlyToolThroughApplicationContracts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Query().Get("message") == "" {

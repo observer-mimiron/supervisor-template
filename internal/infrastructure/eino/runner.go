@@ -1,36 +1,96 @@
-// Package eino 提供 Eino ADK 的运行适配。
-//
-// 本文件只封装官方 Runner 的 Query/Resume 入口，让上层不依赖 Eino 具体装配细节；
-// 领域层和应用层不直接导入 Eino。
+// Package eino adapts Eino ADK to the framework-neutral application Runner.
 package eino
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+	"github.com/observer-mimiron/supervisor-template/internal/application"
+	"github.com/observer-mimiron/supervisor-template/internal/application/run"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
 
-// Runner 是 Eino ADK Runner 的最小包装。
+// Runner executes one already-approved step. Eino never advances a domain plan.
 type Runner struct {
 	runner *adk.Runner
 }
 
-// NewRunner 按官方示例创建支持流式事件和 checkpoint 的 Runner。
 func NewRunner(ctx context.Context, agent adk.Agent, store compose.CheckPointStore) *Runner {
-	return &Runner{runner: adk.NewRunner(ctx, adk.RunnerConfig{
-		Agent:           agent,
-		EnableStreaming: true,
-		CheckPointStore: store,
-	})}
+	return &Runner{runner: adk.NewRunner(ctx, adk.RunnerConfig{Agent: agent, EnableStreaming: true, CheckPointStore: store})}
 }
 
-// Query 启动一次带 checkpoint 标识的 Eino 执行。
 func (r *Runner) Query(ctx context.Context, input, checkpointID string) *adk.AsyncIterator[*adk.AgentEvent] {
 	return r.runner.Query(ctx, input, adk.WithCheckPointID(checkpointID))
 }
 
-// Resume 从 Eino checkpoint 继续执行。
 func (r *Runner) Resume(ctx context.Context, checkpointID string) (*adk.AsyncIterator[*adk.AgentEvent], error) {
 	return r.runner.Resume(ctx, checkpointID)
 }
+
+func (r *Runner) Run(ctx context.Context, request application.WorkerRequest) (application.WorkerResult, error) {
+	if r == nil || r.runner == nil || ctx == nil {
+		return application.WorkerResult{}, &application.PreCallError{Err: errors.New("Eino Runner 或 context 未装配")}
+	}
+	step := request.Step
+	if step.StepID == "" {
+		step = agent.PlanStep{StepID: "current", WorkerID: request.WorkerID, ToolID: request.ToolID, Intent: request.Intent, Input: request.Input, Status: agent.StepRunning}
+	}
+	if request.RunID == "" || step.StepID == "" || step.Status != agent.StepRunning || step.ToolID == "" || step.WorkerID != request.WorkerID || step.ToolID != request.ToolID {
+		return application.WorkerResult{}, &application.PreCallError{Err: errors.New("Eino Runner 只接受当前已批准的 running 步骤")}
+	}
+	if request.ResumeToken != "" {
+		return application.WorkerResult{}, &application.PreCallError{Err: errors.New("Eino ADK checkpoint resume requires an interrupted checkpoint")}
+	}
+	query := fmt.Sprintf("worker=%s\nintent=%s\napproved_tool=%s\ninput=%v\n", step.WorkerID, step.Intent, step.ToolID, step.Input)
+	checkpointID := request.Session.Checkpoint
+	if checkpointID == "" {
+		checkpointID = request.RunID + ":" + step.StepID
+	}
+	iter := r.runner.Query(ctx, query, adk.WithCheckPointID(checkpointID))
+	var content string
+	for {
+		if err := ctx.Err(); err != nil {
+			return application.WorkerResult{}, err
+		}
+		event, ok := iter.Next()
+		if !ok {
+			break
+		}
+		if event == nil {
+			continue
+		}
+		if event.Err != nil {
+			return application.WorkerResult{}, event.Err
+		}
+		if event.Output == nil || event.Output.MessageOutput == nil {
+			continue
+		}
+		message, err := event.Output.MessageOutput.GetMessage()
+		if err != nil {
+			return application.WorkerResult{}, err
+		}
+		if message == nil {
+			continue
+		}
+		if len(message.ToolCalls) > 0 {
+			if len(message.ToolCalls) != 1 || message.ToolCalls[0].Function.Name != step.ToolID {
+				return application.WorkerResult{}, fmt.Errorf("Eino 请求了未批准的 Tool")
+			}
+			return application.WorkerResult{}, fmt.Errorf("Eino agent 必须将 Tool 调用交由已绑定的 Tool Pool 执行")
+		}
+		if message.Role == schema.Assistant && message.Content != "" {
+			content += message.Content
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return application.WorkerResult{}, err
+	}
+	return application.WorkerResult{Content: content, Checkpoint: checkpointID}, nil
+}
+
+var _ application.WorkerRunner = (*Runner)(nil)
+var _ run.StepRunner = run.AdaptStepRunner{}

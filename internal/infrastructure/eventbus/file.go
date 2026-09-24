@@ -52,6 +52,11 @@ func (b *FileBus) Append(event agent.RunEvent) (agent.RunEvent, error) {
 	if err != nil {
 		return agent.RunEvent{}, err
 	}
+	for _, existing := range record.Events {
+		if existing.EventID == event.EventID {
+			return existing, nil
+		}
+	}
 	expected := int64(len(record.Events) + 1)
 	if event.Sequence == 0 {
 		event.Sequence = expected
@@ -151,10 +156,11 @@ func isTerminalEvent(eventType agent.EventType) bool {
 // cloneEvent 复制事件数据，避免外部修改事件总线内容。
 func cloneEvent(event agent.RunEvent) agent.RunEvent {
 	if event.Data != nil {
-		event.Data = make(map[string]string, len(event.Data))
+		data := make(map[string]string, len(event.Data))
 		for key, value := range event.Data {
-			event.Data[key] = value
+			data[key] = value
 		}
+		event.Data = data
 	}
 	return event
 }

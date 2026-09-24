@@ -6,12 +6,15 @@ package run
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
@@ -24,23 +27,34 @@ import (
 type Error struct {
 	Code    agent.ErrorCode
 	Message string
+	cause   error
 }
 
 // Error 返回不包含内部堆栈和凭证的用户可理解消息。
 func (e *Error) Error() string { return e.Message }
+
+// Unwrap 保留内部持久化错误供进程内诊断，同时公开消息仍保持稳定。
+func (e *Error) Unwrap() error { return e.cause }
 
 // Service 是单进程运行状态和 ExecutionPlan 的唯一 owner。
 type Service struct {
 	mu        sync.Mutex
 	deps      application.Dependencies
 	approvals map[string]*approval.Request
+	controlMu sync.Mutex
+	active    map[string]*runControl
 	sequence  atomic.Uint64
 	now       func() time.Time
 }
 
+type runControl struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 // NewService 创建运行服务；依赖必须由 composition 统一装配。
 func NewService(deps application.Dependencies) *Service {
-	return &Service{deps: deps, approvals: make(map[string]*approval.Request), now: time.Now}
+	return &Service{deps: deps, approvals: make(map[string]*approval.Request), active: make(map[string]*runControl), now: time.Now}
 }
 
 // Start 接收一次用户请求，返回稳定 run_id；重复提交同一 run_id 只重放原事件。
@@ -75,6 +89,7 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 	if request.RequestedAt.IsZero() {
 		request.RequestedAt = s.now()
 	}
+	budget := s.budget()
 	if err := s.deps.Repository.SaveRequest(request); err != nil {
 		return request.RunID, err
 	}
@@ -107,7 +122,7 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 		Status:         agent.StepPending,
 		IdempotencyKey: request.RunID + ":step-1",
 	}
-	plan, err := agent.NewExecutionPlan(request.RunID+":plan", request.RunID, []agent.PlanStep{step}, 1, s.now().Add(5*time.Second))
+	plan, err := agent.NewExecutionPlan(request.RunID+":plan", request.RunID, []agent.PlanStep{step}, budget.MaxPlanSteps, s.now().Add(budget.Timeout))
 	if err != nil {
 		_ = s.failLocked(request.RunID, "INTERNAL_ERROR", "无法创建执行计划")
 		return request.RunID, err
@@ -200,11 +215,21 @@ func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, 
 
 // Cancel 将主体拥有的未终态执行标记为 canceled，并持久化唯一取消事件。
 func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.authorizeRun(ctx, subject, runID); err != nil {
 		return err
 	}
+	if control := s.activeRun(runID); control != nil {
+		control.cancel()
+		select {
+		case <-control.done:
+		case <-time.After(250 * time.Millisecond):
+			return &Error{Code: agent.ErrorOutcomeUnknown, Message: "执行尚未观察到取消信号"}
+		case <-ctx.Done():
+			return &Error{Code: agent.ErrorOutcomeUnknown, Message: "取消请求未完成"}
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	plan, ok, err := s.loadPlan(runID)
 	if err != nil {
 		return err
@@ -249,7 +274,22 @@ func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID st
 		return nil, &Error{Code: "RUN_NOT_RESUMABLE", Message: "checkpoint 与执行计划不匹配"}
 	}
 	if agent.IsTerminal(plan.Status) {
+		if err := s.repairStepProjectionsLocked(plan); err != nil {
+			return s.deps.EventBus.Events(runID), err
+		}
+		if err := s.repairTerminalEventLocked(plan); err != nil {
+			return s.deps.EventBus.Events(runID), err
+		}
 		return s.deps.EventBus.Events(runID), nil
+	}
+	if err := s.repairStepProjectionsLocked(plan); err != nil {
+		return s.deps.EventBus.Events(runID), err
+	}
+	if plan.Status == agent.RunWaitingReconciliation {
+		return s.deps.EventBus.Events(runID), &Error{Code: agent.ErrorOutcomeUnknown, Message: "外部执行结果待人工核对"}
+	}
+	if s.activeRun(runID) != nil {
+		return s.deps.EventBus.Events(runID), &Error{Code: agent.ErrorInvalidState, Message: "执行正在运行"}
 	}
 	approvalRequest, ok, err := s.approvalLocked(runID)
 	if err != nil {
@@ -295,10 +335,24 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		}
 		return s.terminateLocked(&plan, agent.RunCanceled, agent.ErrorCanceled, "执行已取消")
 	}
-	if !plan.Deadline.IsZero() && !time.Now().Before(plan.Deadline) {
+	if !plan.Deadline.IsZero() && !s.now().Before(plan.Deadline) {
 		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorToolTimeout, "能力执行超时")
 	}
-	step := &plan.Steps[0]
+	budget := s.budget()
+	if budget.MaxPlanSteps <= 0 || plan.MaxSteps > budget.MaxPlanSteps || len(plan.Steps) > budget.MaxPlanSteps {
+		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorBudgetExceeded, "执行步骤超过预算")
+	}
+	stepIndex := nextStepIndex(plan)
+	if stepIndex < 0 {
+		if plan.Status == agent.RunCompleted {
+			return s.repairTerminalEventLocked(plan)
+		}
+		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInvalidState, "执行计划没有可推进步骤")
+	}
+	step := &plan.Steps[stepIndex]
+	if step.Status == agent.StepWaitingReconciliation {
+		return &Error{Code: agent.ErrorOutcomeUnknown, Message: "外部执行结果待人工核对"}
+	}
 	if step.Status == agent.StepWaitingApproval {
 		request, ok, err := s.approvalLocked(plan.RunID)
 		if err != nil {
@@ -308,9 +362,39 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 			return &Error{Code: "APPROVAL_REQUIRED", Message: "执行仍等待审批"}
 		}
 	}
+	var memories []conversation.MemoryEntry
+	if s.deps.MemoryRead != nil {
+		request, found, err := s.loadRequest(plan.RunID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInternal, "执行请求不存在")
+		}
+		scope := conversation.MemoryScope{TenantID: request.Subject.TenantID, SubjectID: request.Subject.SubjectID, ConversationID: request.ConversationID, Kind: conversation.MemoryWorking}
+		memories, err = s.deps.MemoryRead.Query(ctx, conversation.MemoryQuery{Scope: scope, Limit: 10, MaxBytes: 4096, Now: s.now()})
+		if err != nil {
+			return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInternal, "会话记忆读取失败")
+		}
+	}
+	if s.deps.ToolValidator != nil {
+		if err := s.deps.ToolValidator.ValidateInput(step.ToolID, step.Input); err != nil {
+			return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInvalidOutput, "能力输入未通过结构校验")
+		}
+	}
 	if err := plan.TransitionStep(step.StepID, agent.StepRunning); err != nil {
 		return err
 	}
+	attemptLimit := budget.MaxToolCalls
+	if budget.CostBudget < attemptLimit {
+		attemptLimit = budget.CostBudget
+	}
+	totalAttempts := planAttempts(plan)
+	if attemptLimit <= 0 || totalAttempts >= attemptLimit {
+		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorBudgetExceeded, "能力调用超过预算")
+	}
+	step.Attempts++
+	step.AttemptStatus = "running"
 	if err := s.deps.Repository.SavePlan(plan); err != nil {
 		return err
 	}
@@ -332,11 +416,19 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if !plan.Deadline.IsZero() {
 		toolCtx, cancel = context.WithDeadline(ctx, plan.Deadline)
 	}
-	defer cancel()
+	toolCtx, cancelRun := context.WithCancel(toolCtx)
+	control := &runControl{cancel: func() { cancelRun(); cancel() }, done: make(chan struct{})}
+	s.registerRun(plan.RunID, control)
 	runner := s.workerRunner()
 	if runner == nil {
+		close(control.done)
+		s.unregisterRun(plan.RunID, control)
+		cancelRun()
+		cancel()
 		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInternal, "Worker Runner 未装配")
 	}
+	// 外部 Runner 不得持有状态锁；Cancel 可以在此期间发出协作式取消。
+	s.mu.Unlock()
 	workerResult, err := runner.Run(toolCtx, application.WorkerRequest{
 		RunID:          plan.RunID,
 		WorkerID:       step.WorkerID,
@@ -345,25 +437,74 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		Input:          cloneMap(step.Input),
 		IdempotencyKey: step.IdempotencyKey,
 		Deadline:       plan.Deadline,
+		Memories:       cloneMemories(memories),
 	})
+	observedCtxErr := toolCtx.Err()
+	s.mu.Lock()
+	close(control.done)
+	s.unregisterRun(plan.RunID, control)
+	cancelRun()
+	cancel()
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(toolCtx.Err(), context.Canceled) {
+		policy := DefaultErrorPolicy{}
+		class := policy.Classify(err, application.PhaseInFlight)
+		if errors.Is(err, application.ErrOutcomeUnknown) {
+			return s.markOutcomeUnknownLocked(&plan, step)
+		}
+		if class == application.ErrorCanceled || errors.Is(observedCtxErr, context.Canceled) {
 			return s.terminateLocked(&plan, agent.RunCanceled, agent.ErrorCanceled, "执行已取消")
 		}
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(toolCtx.Err(), context.DeadlineExceeded) || (!plan.Deadline.IsZero() && !time.Now().Before(plan.Deadline)) {
+		if class == application.ErrorTimeout || errors.Is(observedCtxErr, context.DeadlineExceeded) || (!plan.Deadline.IsZero() && !s.now().Before(plan.Deadline)) {
 			return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorToolTimeout, "能力执行超时")
 		}
-		return s.terminateLocked(&plan, agent.RunFailed, "TOOL_ERROR", "能力执行失败")
+		var preCall *application.PreCallError
+		if errors.As(err, &preCall) {
+			if policy.Classify(err, application.PhasePreCall) == application.ErrorPreCallFailure && policy.Decide(application.ErrorPreCallFailure, step.Attempts, budget.MaxRetries) == application.Retry && totalAttempts < attemptLimit {
+				step.AttemptStatus = "failed_pre_call"
+				if err := s.deps.Repository.SavePlan(plan); err != nil {
+					return err
+				}
+				if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "retrying", "step_id": step.StepID}); err != nil {
+					return err
+				}
+				// A pre-call failure never entered the external system, so the step
+				// can safely return to pending for the next bounded attempt.
+				step.Status = agent.StepPending
+				plan.Status = agent.RunPending
+				if err := s.deps.Repository.SavePlan(plan); err != nil {
+					return err
+				}
+				return s.executeLocked(ctx, plan)
+			}
+			return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorBudgetExceeded, "能力重试超过预算")
+		}
+		code := agent.ErrorInternal
+		if class == application.ErrorUnavailable || class == application.ErrorBusiness {
+			code = agent.ErrorInternal
+		}
+		return s.terminateLocked(&plan, agent.RunFailed, code, "能力执行失败")
 	}
 	result := workerResult.Content
+	if observedCtxErr != nil {
+		return s.markOutcomeUnknownLocked(&plan, step)
+	}
+	if s.deps.ToolValidator != nil {
+		if err := s.deps.ToolValidator.ValidateOutput(step.ToolID, result); err != nil {
+			return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInvalidOutput, "能力输出未通过结构校验")
+		}
+	}
 	if err := guardToolResult(result); err != nil {
 		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInvalidOutput, "能力输出未通过安全校验")
 	}
 	if err := plan.TransitionStep(step.StepID, agent.StepSucceeded); err != nil {
 		return err
 	}
+	step.AttemptStatus = "succeeded"
+	step.ResultContent = result
+	digest := sha256.Sum256([]byte(result))
+	step.ResultDigest = hex.EncodeToString(digest[:])
 	if err := s.deps.Repository.SavePlan(plan); err != nil {
-		return err
+		return s.markOutcomeUnknownLocked(&plan, step)
 	}
 	version, err = nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
 	if err != nil {
@@ -375,10 +516,97 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "succeeded", "step_id": step.StepID}); err != nil {
 		return err
 	}
-	if err := s.emitLocked(plan.RunID, agent.Text, map[string]string{"content": result}); err != nil {
+	if err := s.emitLocked(plan.RunID, agent.Text, map[string]string{"content": result, "step_id": step.StepID}); err != nil {
 		return err
 	}
-	return s.emitLocked(plan.RunID, agent.Completed, map[string]string{"message": "执行完成"})
+	if plan.Status == agent.RunCompleted {
+		return s.emitLocked(plan.RunID, agent.Completed, map[string]string{"message": "执行完成"})
+	}
+	// A successful step is durable before the next step is selected. The
+	// manager, not the Runner, owns ordered progression and terminal projection.
+	plan.Status = agent.RunPending
+	if err := s.deps.Repository.SavePlan(plan); err != nil {
+		return err
+	}
+	return s.executeLocked(ctx, plan)
+}
+
+// markOutcomeUnknownLocked records that the external call started but its result
+// could not be durably committed. It deliberately never retries the Runner.
+func (s *Service) markOutcomeUnknownLocked(plan *agent.ExecutionPlan, step *agent.PlanStep) error {
+	if step.Status != agent.StepWaitingReconciliation {
+		// The durable write may have failed after the external call. At this
+		// point the in-memory plan is intentionally forced into reconciliation.
+		step.Status = agent.StepWaitingReconciliation
+		plan.Status = agent.RunWaitingReconciliation
+	}
+	step.AttemptStatus = "unknown"
+	var persistErr error
+	if err := s.deps.Repository.SavePlan(*plan); err != nil {
+		persistErr = errors.Join(persistErr, fmt.Errorf("保存未知结果计划失败: %w", err))
+	}
+	if version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID); err == nil {
+		if err := s.saveCheckpointLocked(*plan, version); err != nil {
+			persistErr = errors.Join(persistErr, fmt.Errorf("保存未知结果 checkpoint 失败: %w", err))
+		}
+	} else {
+		persistErr = errors.Join(persistErr, fmt.Errorf("读取未知结果 checkpoint 版本失败: %w", err))
+	}
+	if err := s.emitLocked(plan.RunID, agent.ReconciliationRequired, map[string]string{
+		"code": string(agent.ErrorOutcomeUnknown), "message": "外部执行结果待人工核对",
+	}); err != nil {
+		persistErr = errors.Join(persistErr, fmt.Errorf("记录未知结果事件失败: %w", err))
+	}
+	unknown := &Error{Code: agent.ErrorOutcomeUnknown, Message: "外部执行结果待人工核对"}
+	if persistErr != nil {
+		unknown.cause = persistErr
+	}
+	return unknown
+}
+
+func (s *Service) repairTerminalEventLocked(plan agent.ExecutionPlan) error {
+	for _, event := range s.deps.EventBus.Events(plan.RunID) {
+		if event.Type == agent.Completed || event.Type == agent.Failed || event.Type == agent.Canceled {
+			return nil
+		}
+	}
+	if plan.Status == agent.RunCompleted {
+		return s.emitLocked(plan.RunID, agent.Completed, map[string]string{"message": "执行完成"})
+	}
+	if plan.Status == agent.RunCanceled {
+		return s.emitLocked(plan.RunID, agent.Canceled, map[string]string{"code": string(plan.TerminalCode), "message": "执行已取消"})
+	}
+	return s.emitLocked(plan.RunID, agent.Failed, map[string]string{"code": string(plan.TerminalCode), "message": "执行失败"})
+}
+
+func (s *Service) repairStepProjectionsLocked(plan agent.ExecutionPlan) error {
+	events := s.deps.EventBus.Events(plan.RunID)
+	for _, step := range plan.Steps {
+		if step.Status != agent.StepSucceeded {
+			continue
+		}
+		progressFound, textFound := false, false
+		for _, event := range events {
+			if event.Type == agent.Progress && event.Data["status"] == "succeeded" && event.Data["step_id"] == step.StepID {
+				progressFound = true
+			}
+			if event.Type == agent.Text && event.Data["step_id"] == step.StepID {
+				textFound = true
+			}
+		}
+		if !progressFound {
+			if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "succeeded", "step_id": step.StepID}); err != nil {
+				return err
+			}
+		}
+		if !textFound {
+			if err := s.emitLocked(plan.RunID, agent.Text, map[string]string{"content": step.ResultContent, "step_id": step.StepID}); err != nil {
+				return err
+			}
+		}
+		events = s.deps.EventBus.Events(plan.RunID)
+	}
+	return nil
 }
 
 // workerRunner 返回新的执行合同；旧测试和旧装配仅注入 Tool 时使用兼容适配器。
@@ -390,6 +618,43 @@ func (s *Service) workerRunner() application.WorkerRunner {
 		return application.SingleToolRunner{Tools: s.deps.Tools}
 	}
 	return nil
+}
+
+func (s *Service) budget() application.ExecutionBudget {
+	budget := s.deps.Budget
+	if budget.MaxPlanSteps <= 0 {
+		budget.MaxPlanSteps = 1
+	}
+	if budget.MaxToolCalls <= 0 {
+		budget.MaxToolCalls = 1
+	}
+	if budget.CostBudget <= 0 {
+		budget.CostBudget = budget.MaxToolCalls
+	}
+	if budget.Timeout <= 0 {
+		budget.Timeout = 5 * time.Second
+	}
+	return budget
+}
+
+func (s *Service) registerRun(runID string, control *runControl) {
+	s.controlMu.Lock()
+	s.active[runID] = control
+	s.controlMu.Unlock()
+}
+
+func (s *Service) unregisterRun(runID string, control *runControl) {
+	s.controlMu.Lock()
+	if s.active[runID] == control {
+		delete(s.active, runID)
+	}
+	s.controlMu.Unlock()
+}
+
+func (s *Service) activeRun(runID string) *runControl {
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	return s.active[runID]
 }
 
 // authorizeRun 从持久化请求读取 run 所有者，避免仅凭 run_id 暴露或控制执行。
@@ -446,7 +711,11 @@ func (s *Service) failLocked(runID, code, message string) error {
 // terminateLocked 收口失败或取消分支，确保计划、checkpoint 和终态事件一致。
 func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunStatus, code agent.ErrorCode, message string) error {
 	if !agent.IsTerminal(plan.Status) && len(plan.Steps) > 0 {
-		step := &plan.Steps[0]
+		stepIndex := nextStepIndex(*plan)
+		if stepIndex < 0 {
+			return plan.MarkTerminal(status, code)
+		}
+		step := &plan.Steps[stepIndex]
 		if step.Status != agent.StepSucceeded && step.Status != agent.StepFailed && step.Status != agent.StepCanceled {
 			next := agent.StepFailed
 			if status == agent.RunCanceled {
@@ -566,11 +835,45 @@ func cloneMap(values map[string]string) map[string]string {
 	return cloned
 }
 
+func cloneMemories(entries []conversation.MemoryEntry) []conversation.MemoryEntry {
+	cloned := make([]conversation.MemoryEntry, len(entries))
+	for i, entry := range entries {
+		cloned[i] = entry
+		cloned[i].Metadata = cloneMap(entry.Metadata)
+	}
+	return cloned
+}
+
+func nextStepIndex(plan agent.ExecutionPlan) int {
+	for i, step := range plan.Steps {
+		if step.Status != agent.StepSucceeded {
+			return i
+		}
+	}
+	return -1
+}
+
+func planAttempts(plan agent.ExecutionPlan) int {
+	total := 0
+	for _, step := range plan.Steps {
+		total += step.Attempts
+	}
+	return total
+}
+
 // guardToolResult 拒绝把凭证、Prompt 或内部路径送入公开文本事件。
 func guardToolResult(result string) error {
 	value := strings.ToLower(strings.TrimSpace(result))
 	if value == "" {
 		return errors.New("能力输出为空")
+	}
+	if !utf8.ValidString(result) || len(result) > 1<<20 {
+		return errors.New("能力输出格式或大小非法")
+	}
+	for _, char := range result {
+		if char == '\u0000' || (char < 0x20 && char != '\n' && char != '\r' && char != '\t') {
+			return errors.New("能力输出包含控制字符")
+		}
 	}
 	for _, marker := range []string{
 		"api_key=", "apikey=", "authorization:", "bearer ", "password=", "secret=", "sk-",

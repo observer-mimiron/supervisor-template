@@ -10,10 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/observer-mimiron/supervisor-template/internal/application"
 	"github.com/observer-mimiron/supervisor-template/internal/composition"
 	"github.com/observer-mimiron/supervisor-template/internal/config"
+	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
 
 func TestChatProjectsReadOnlyRunAsOrderedSSE(t *testing.T) {
@@ -38,6 +41,22 @@ func TestChatProjectsReadOnlyRunAsOrderedSSE(t *testing.T) {
 	}
 }
 
+func TestChatFakeFlowCompletesWithinFiveSeconds(t *testing.T) {
+	router := newTestRouter(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"conversation_id":"demo","message":"分析示例用户分群"}`))
+	request.Header.Set("Content-Type", "application/json")
+	withBearer(request)
+	response := httptest.NewRecorder()
+	started := time.Now()
+	router.ServeHTTP(response, request)
+	if elapsed := time.Since(started); elapsed >= 5*time.Second {
+		t.Fatalf("fake /api/chat flow took %s", elapsed)
+	}
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "event: completed") {
+		t.Fatalf("unexpected timed smoke response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 	router := newTestRouter(t)
 	request := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"conversation_id":"demo","message":"分析示例用户分群"}`))
@@ -48,6 +67,32 @@ func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestSSEProjectionRedactsSensitiveFields(t *testing.T) {
+	router := newTestRouter(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"conversation_id":"demo","message":"分析示例用户分群"}`))
+	request.Header.Set("Content-Type", "application/json")
+	withBearer(request)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "authorization") {
+		t.Fatalf("unexpected redaction response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRedactEventDataDropsSensitiveKeysAndValues(t *testing.T) {
+	data := redactEventData(map[string]string{
+		"token":         "secret-token",
+		"prompt_text":   "private prompt",
+		"trace":         "stack trace: internal/path",
+		"content":       "safe result",
+		"note":          "Bearer hidden",
+		"authorization": "hidden",
+	})
+	if len(data) != 1 || data["content"] != "safe result" {
+		t.Fatalf("sensitive event data was not redacted: %#v", data)
 	}
 }
 
@@ -166,7 +211,39 @@ func TestUnknownCapabilityRemainsClassifiedInSSE(t *testing.T) {
 	}
 }
 
+func TestArbitraryUnmatchedMessageDoesNotCallReadOnlyTool(t *testing.T) {
+	router, app := newTestRouterWithApp(t)
+	body := `{"conversation_id":"demo","message":"请帮我写一首诗"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	withBearer(request)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "UNKNOWN_CAPABILITY") {
+		t.Fatalf("unexpected unmatched response: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "event: tool_call") {
+		t.Fatalf("unmatched message entered Tool execution: %s", response.Body.String())
+	}
+	runner, ok := app.Health.Dependencies.Runner.(application.SingleToolRunner)
+	if !ok {
+		t.Fatal("composition did not install SingleToolRunner")
+	}
+	registry, ok := runner.Tools.(*toolinfra.Registry)
+	if !ok {
+		t.Fatal("composition did not install registered Tool")
+	}
+	if registry.OutreachCount() != 0 {
+		t.Fatalf("unmatched message entered a Tool: count=%d", registry.OutreachCount())
+	}
+}
+
 func newTestRouter(t *testing.T) *gin.Engine {
+	router, _ := newTestRouterWithApp(t)
+	return router
+}
+
+func newTestRouterWithApp(t *testing.T) (*gin.Engine, *composition.App) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	t.Setenv("AGENT_AUTH_DEMO_TOKEN_SHA256", tokenSHA256("test-token"))
@@ -184,7 +261,7 @@ func newTestRouter(t *testing.T) *gin.Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRouter(app.Run, app.Health, app.Authenticator)
+	return NewRouter(app.Run, app.Health, app.Authenticator), app
 }
 
 func withBearer(request *http.Request) {

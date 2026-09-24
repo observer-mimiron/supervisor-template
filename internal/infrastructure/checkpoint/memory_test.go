@@ -22,3 +22,20 @@ func TestMemoryStoreIncrementsVersion(t *testing.T) {
 		t.Fatal("expected version gap rejection")
 	}
 }
+
+func TestMemoryStoreReturnsCloneIsolation(t *testing.T) {
+	store := NewMemoryStore()
+	snapshot := agent.Checkpoint{RunID: "run-clone", PlanID: "plan-1", Status: agent.RunRunning, Version: 1, CompletedStepIDs: []string{"step-1"}}
+	if _, err := store.Save(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok := store.Get(snapshot.RunID)
+	if !ok {
+		t.Fatal("checkpoint not found")
+	}
+	loaded.CompletedStepIDs[0] = "tampered"
+	again, _ := store.Get(snapshot.RunID)
+	if again.CompletedStepIDs[0] != "step-1" {
+		t.Fatalf("checkpoint leaked mutable state: %#v", again)
+	}
+}
