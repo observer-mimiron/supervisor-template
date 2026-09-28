@@ -48,6 +48,7 @@ func NewDeepSeekSupervisor(ctx context.Context, cfg config.ModelConfig, instruct
 		MaxTokens:          cfg.MaxTokens,
 		Timeout:            cfg.Timeout,
 		ResponseFormatType: deepseekmodel.ResponseFormatTypeJSONObject,
+		ThinkingConfig:     &deepseekmodel.ThinkingConfig{Type: "disabled"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("创建真实 ChatModel 失败: %w", err)
@@ -58,6 +59,14 @@ func NewDeepSeekSupervisor(ctx context.Context, cfg config.ModelConfig, instruct
 // NewRealSupervisor 包装一个已创建的 Eino ToolCallingChatModel，便于合同测试替换模型。
 func NewRealSupervisor(chatModel einomodel.ToolCallingChatModel, instruction string, timeout time.Duration) *RealSupervisor {
 	return &RealSupervisor{model: chatModel, instruction: instruction, timeout: timeout}
+}
+
+// Model exposes the already-created tool-calling model for Worker adapters.
+func (s *RealSupervisor) Model() einomodel.ToolCallingChatModel {
+	if s == nil {
+		return nil
+	}
+	return s.model
 }
 
 // Decide 调用模型并把 JSON 输出解析为候选路由；它不会把模型输出当成授权结果。
@@ -105,6 +114,12 @@ func parseDecision(raw string) (agent.SupervisorDecision, error) {
 		Arguments  map[string]string `json:"arguments"`
 		Risk       agent.Risk        `json:"risk"`
 		Confidence float64           `json:"confidence"`
+		Steps      []struct {
+			WorkerID  string            `json:"worker_id"`
+			Intent    string            `json:"intent"`
+			Arguments map[string]string `json:"arguments"`
+			Risk      agent.Risk        `json:"risk"`
+		} `json:"steps"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -127,11 +142,21 @@ func parseDecision(raw string) (agent.SupervisorDecision, error) {
 	if payload.Confidence < 0 || payload.Confidence > 1 {
 		return agent.SupervisorDecision{}, errors.New("真实模型路由置信度非法")
 	}
-	return agent.SupervisorDecision{
+	decision := agent.SupervisorDecision{
 		WorkerID:   payload.WorkerID,
 		Intent:     payload.Intent,
 		Arguments:  payload.Arguments,
 		Risk:       payload.Risk,
 		Confidence: payload.Confidence,
-	}, nil
+	}
+	if len(payload.Steps) > 2 {
+		return agent.SupervisorDecision{}, errors.New("真实模型候选步骤超过两个")
+	}
+	for _, step := range payload.Steps {
+		if step.WorkerID == "" || step.Intent == "" || step.Arguments == nil || step.Arguments["tool_id"] == "" || step.Arguments["message"] == "" || (step.Risk != agent.RiskReadOnly && step.Risk != agent.RiskSideEffect) {
+			return agent.SupervisorDecision{}, errors.New("真实模型候选步骤字段非法")
+		}
+		decision.Steps = append(decision.Steps, agent.CandidateStep{WorkerID: step.WorkerID, Intent: step.Intent, Arguments: step.Arguments, Risk: step.Risk})
+	}
+	return decision, nil
 }

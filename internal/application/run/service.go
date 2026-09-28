@@ -40,6 +40,7 @@ func (e *Error) Unwrap() error { return e.cause }
 type Service struct {
 	mu        sync.Mutex
 	deps      application.Dependencies
+	ctx       context.Context
 	approvals map[string]*approval.Request
 	controlMu sync.Mutex
 	active    map[string]*runControl
@@ -61,9 +62,12 @@ func NewService(deps application.Dependencies) *Service {
 func (s *Service) Start(ctx context.Context, request conversation.ExecutionRequest) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ctx = ctx
+	defer func() { s.ctx = nil }()
 	if request.RunID == "" {
 		request.RunID = s.newRunID()
 	}
+	s.observe(ctx, application.RuntimeObservation{RunID: request.RunID, Phase: "run.start"})
 	if !request.Subject.Valid() {
 		return request.RunID, &Error{Code: agent.ErrorUnauthenticated, Message: "身份凭证无效"}
 	}
@@ -93,36 +97,66 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 	if err := s.deps.Repository.SaveRequest(request); err != nil {
 		return request.RunID, err
 	}
+	if err := ctx.Err(); err != nil {
+		// Record an already-canceled request without allowing its canceled
+		// context to block the durable audit events.
+		previousContext := s.ctx
+		s.ctx = context.WithoutCancel(ctx)
+		defer func() { s.ctx = previousContext }()
+		if emitErr := s.emitLocked(request.RunID, agent.Started, map[string]string{"conversation_id": request.ConversationID}); emitErr != nil {
+			return request.RunID, emitErr
+		}
+		if emitErr := s.emitLocked(request.RunID, agent.Canceled, map[string]string{"code": string(agent.ErrorCanceled), "message": "执行已取消"}); emitErr != nil {
+			return request.RunID, emitErr
+		}
+		return request.RunID, &Error{Code: agent.ErrorCanceled, Message: "执行已取消"}
+	}
 	if err := s.emitLocked(request.RunID, agent.Started, map[string]string{"conversation_id": request.ConversationID}); err != nil {
 		return request.RunID, err
 	}
 	decision, err := s.deps.Supervisor.Decide(ctx, request)
+	s.observe(ctx, application.RuntimeObservation{RunID: request.RunID, Phase: "run.decision"})
 	if err != nil {
 		_ = s.failLocked(request.RunID, "INTERNAL_ERROR", "无法生成路由决策")
 		return request.RunID, err
 	}
 	if err := s.emitLocked(request.RunID, agent.Decision, map[string]string{
-		"worker_id": decision.WorkerID,
-		"tool_id":   decision.Arguments["tool_id"],
+		"worker_id":  decision.WorkerID,
+		"tool_id":    decision.Arguments["tool_id"],
+		"step_count": fmt.Sprintf("%d", decisionStepCount(decision)),
 	}); err != nil {
 		return request.RunID, err
 	}
-	route, err := s.deps.Policy.Evaluate(decision)
-	if err != nil {
-		code := classifyPolicyError(err)
-		_ = s.failLocked(request.RunID, string(code), publicPolicyMessage(code))
-		return request.RunID, &Error{Code: code, Message: publicPolicyMessage(code)}
+	candidates := decisionCandidates(decision)
+	if len(candidates) == 0 || len(candidates) > 2 {
+		_ = s.failLocked(request.RunID, string(agent.ErrorBudgetExceeded), "候选计划最多包含两个有序步骤")
+		return request.RunID, &Error{Code: agent.ErrorBudgetExceeded, Message: "候选计划最多包含两个有序步骤"}
 	}
-	step := agent.PlanStep{
-		StepID:         request.RunID + ":step-1",
-		WorkerID:       decision.WorkerID,
-		Intent:         decision.Intent,
-		ToolID:         route.AllowedTools[0],
-		Input:          cloneMap(decision.Arguments),
-		Status:         agent.StepPending,
-		IdempotencyKey: request.RunID + ":step-1",
+	steps := make([]agent.PlanStep, 0, len(candidates))
+	approvalRequired := false
+	for index, candidate := range candidates {
+		if candidate.WorkerID == "" || candidate.Intent == "" || candidate.Arguments == nil || candidate.Arguments["tool_id"] == "" || candidate.Arguments["message"] == "" {
+			_ = s.failLocked(request.RunID, string(agent.ErrorPolicyDenied), "候选步骤缺少必要字段")
+			return request.RunID, &Error{Code: agent.ErrorPolicyDenied, Message: "候选步骤缺少必要字段"}
+		}
+		route, routeErr := s.deps.Policy.Evaluate(agent.SupervisorDecision{
+			DecisionID: request.RunID + ":decision",
+			WorkerID:   candidate.WorkerID,
+			Intent:     candidate.Intent,
+			Arguments:  cloneMap(candidate.Arguments),
+			Risk:       candidate.Risk,
+			Confidence: decision.Confidence,
+		})
+		if routeErr != nil {
+			code := classifyPolicyError(routeErr)
+			_ = s.failLocked(request.RunID, string(code), publicPolicyMessage(code))
+			return request.RunID, &Error{Code: code, Message: publicPolicyMessage(code)}
+		}
+		stepID := fmt.Sprintf("%s:step-%d", request.RunID, index+1)
+		steps = append(steps, agent.PlanStep{StepID: stepID, WorkerID: candidate.WorkerID, Intent: candidate.Intent, ToolID: route.AllowedTools[0], Input: toolInput(candidate.Arguments), Status: agent.StepPending, IdempotencyKey: stepID})
+		approvalRequired = approvalRequired || route.ApprovalRequired
 	}
-	plan, err := agent.NewExecutionPlan(request.RunID+":plan", request.RunID, []agent.PlanStep{step}, budget.MaxPlanSteps, s.now().Add(budget.Timeout))
+	plan, err := agent.NewExecutionPlan(request.RunID+":plan", request.RunID, steps, budget.MaxPlanSteps, s.now().Add(budget.Timeout))
 	if err != nil {
 		_ = s.failLocked(request.RunID, "INTERNAL_ERROR", "无法创建执行计划")
 		return request.RunID, err
@@ -130,10 +164,17 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 	if err := s.deps.Repository.SavePlan(plan); err != nil {
 		return request.RunID, err
 	}
-	if err := s.emitLocked(request.RunID, agent.Plan, map[string]string{"plan_id": plan.PlanID, "tool_id": step.ToolID}); err != nil {
+	planData := map[string]string{"plan_id": plan.PlanID, "step_count": fmt.Sprintf("%d", len(steps))}
+	for index, step := range steps {
+		planData[fmt.Sprintf("step_%d_worker_id", index+1)] = step.WorkerID
+		planData[fmt.Sprintf("step_%d_tool_id", index+1)] = step.ToolID
+	}
+	if err := s.emitLocked(request.RunID, agent.Plan, planData); err != nil {
 		return request.RunID, err
 	}
-	if route.ApprovalRequired {
+	if approvalRequired {
+		s.observe(ctx, application.RuntimeObservation{RunID: request.RunID, Phase: "approval.wait", WorkerID: steps[0].WorkerID, ToolID: steps[0].ToolID})
+		step := &plan.Steps[0]
 		if err := plan.TransitionStep(step.StepID, agent.StepWaitingApproval); err != nil {
 			return request.RunID, err
 		}
@@ -170,6 +211,8 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, decision string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ctx = ctx
+	defer func() { s.ctx = nil }()
 	if err := s.authorizeRun(ctx, subject, runID); err != nil {
 		return err
 	}
@@ -197,6 +240,7 @@ func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, 
 		return err
 	}
 	if request.Status == approval.Rejected {
+		s.observe(ctx, application.RuntimeObservation{RunID: runID, Phase: "approval.reject"})
 		plan, ok, err := s.loadPlan(runID)
 		if err != nil {
 			return err
@@ -230,6 +274,8 @@ func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ctx = ctx
+	defer func() { s.ctx = nil }()
 	plan, ok, err := s.loadPlan(runID)
 	if err != nil {
 		return err
@@ -251,6 +297,7 @@ func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID st
 			return err
 		}
 	}
+	s.observe(ctx, application.RuntimeObservation{RunID: runID, Phase: "run.cancel", ErrorCode: string(agent.ErrorCanceled)})
 	return nil
 }
 
@@ -258,6 +305,8 @@ func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID st
 func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID string) ([]agent.RunEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.ctx = ctx
+	defer func() { s.ctx = nil }()
 	if err := s.authorizeRun(ctx, subject, runID); err != nil {
 		return nil, err
 	}
@@ -282,6 +331,7 @@ func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID st
 		}
 		return s.deps.EventBus.Events(runID), nil
 	}
+	s.observe(ctx, application.RuntimeObservation{RunID: runID, Phase: "run.resume"})
 	if err := s.repairStepProjectionsLocked(plan); err != nil {
 		return s.deps.EventBus.Events(runID), err
 	}
@@ -306,6 +356,13 @@ func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID st
 
 // Events 返回 run 的事件快照，供 SSE 只读投影。
 func (s *Service) Events(runID string) []agent.RunEvent { return s.deps.EventBus.Events(runID) }
+
+func (s *Service) operationContext() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
 
 // approvalLocked 先读进程缓存，再从 Repository 恢复审批快照，支持重启后的 resume。
 func (s *Service) approvalLocked(runID string) (*approval.Request, bool, error) {
@@ -335,11 +392,9 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		}
 		return s.terminateLocked(&plan, agent.RunCanceled, agent.ErrorCanceled, "执行已取消")
 	}
-	if !plan.Deadline.IsZero() && !s.now().Before(plan.Deadline) {
-		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorToolTimeout, "能力执行超时")
-	}
 	budget := s.budget()
 	if budget.MaxPlanSteps <= 0 || plan.MaxSteps > budget.MaxPlanSteps || len(plan.Steps) > budget.MaxPlanSteps {
+		s.observe(ctx, application.RuntimeObservation{RunID: plan.RunID, Phase: "budget.exhausted", ErrorCode: string(agent.ErrorBudgetExceeded)})
 		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorBudgetExceeded, "执行步骤超过预算")
 	}
 	stepIndex := nextStepIndex(plan)
@@ -361,6 +416,18 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		if !ok || request.Status != approval.Approved {
 			return &Error{Code: "APPROVAL_REQUIRED", Message: "执行仍等待审批"}
 		}
+		// Approval is an operator wait, not Tool execution. Refresh an expired
+		// execution window after approval so a slow review cannot consume the
+		// bounded Worker/Tool deadline before the side effect starts.
+		if plan.Deadline.IsZero() || !s.now().Before(plan.Deadline) {
+			plan.Deadline = s.now().Add(budget.Timeout)
+			if err := s.deps.Repository.SavePlan(plan); err != nil {
+				return err
+			}
+		}
+	}
+	if !plan.Deadline.IsZero() && !s.now().Before(plan.Deadline) {
+		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorToolTimeout, "能力执行超时")
 	}
 	var memories []conversation.MemoryEntry
 	if s.deps.MemoryRead != nil {
@@ -391,6 +458,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	}
 	totalAttempts := planAttempts(plan)
 	if attemptLimit <= 0 || totalAttempts >= attemptLimit {
+		s.observe(ctx, application.RuntimeObservation{RunID: plan.RunID, WorkerID: step.WorkerID, ToolID: step.ToolID, Phase: "budget.exhausted", ErrorCode: string(agent.ErrorBudgetExceeded), Attempt: totalAttempts})
 		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorBudgetExceeded, "能力调用超过预算")
 	}
 	step.Attempts++
@@ -405,10 +473,18 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if err := s.saveCheckpointLocked(plan, version); err != nil {
 		return err
 	}
+	checkpoint, found, err := s.loadCheckpoint(plan.RunID)
+	if err != nil {
+		return err
+	}
+	resumeToken := ""
+	if found {
+		resumeToken = checkpoint.RunnerToken
+	}
 	if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "running", "step_id": step.StepID}); err != nil {
 		return err
 	}
-	if err := s.emitLocked(plan.RunID, agent.ToolCall, map[string]string{"tool_id": step.ToolID}); err != nil {
+	if err := s.emitLocked(plan.RunID, agent.ToolCall, map[string]string{"worker_id": step.WorkerID, "tool_id": step.ToolID}); err != nil {
 		return err
 	}
 	toolCtx := ctx
@@ -427,10 +503,21 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		cancel()
 		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorInternal, "Worker Runner 未装配")
 	}
+	workerStarted := time.Now()
+	s.observe(toolCtx, application.RuntimeObservation{RunID: plan.RunID, WorkerID: step.WorkerID, ToolID: step.ToolID, Phase: "worker.start", Attempt: step.Attempts})
+	s.observe(toolCtx, application.RuntimeObservation{RunID: plan.RunID, WorkerID: step.WorkerID, ToolID: step.ToolID, Phase: "tool.start", Attempt: step.Attempts})
 	// 外部 Runner 不得持有状态锁；Cancel 可以在此期间发出协作式取消。
 	s.mu.Unlock()
 	workerResult, err := runner.Run(toolCtx, application.WorkerRequest{
-		RunID:          plan.RunID,
+		RunID: plan.RunID,
+		Session: application.RunnerSession{
+			RunID: plan.RunID, Checkpoint: plan.RunID + ":" + step.StepID,
+			Deadline: plan.Deadline, ToolBudget: attemptLimit - totalAttempts, ModelBudget: budget.MaxToolCalls,
+		},
+		Step:           *step,
+		ToolBudget:     attemptLimit - totalAttempts,
+		ModelBudget:    budget.MaxToolCalls,
+		ResumeToken:    resumeToken,
 		WorkerID:       step.WorkerID,
 		Intent:         step.Intent,
 		ToolID:         step.ToolID,
@@ -446,6 +533,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	cancelRun()
 	cancel()
 	if err != nil {
+		s.observe(toolCtx, application.RuntimeObservation{RunID: plan.RunID, WorkerID: step.WorkerID, ToolID: step.ToolID, Phase: "tool.error", ErrorCode: string(agent.ErrorInternal), ErrorClass: string(classifyRuntimeError(err)), Attempt: step.Attempts, Duration: time.Since(workerStarted)})
 		policy := DefaultErrorPolicy{}
 		class := policy.Classify(err, application.PhaseInFlight)
 		if errors.Is(err, application.ErrOutcomeUnknown) {
@@ -460,6 +548,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		var preCall *application.PreCallError
 		if errors.As(err, &preCall) {
 			if policy.Classify(err, application.PhasePreCall) == application.ErrorPreCallFailure && policy.Decide(application.ErrorPreCallFailure, step.Attempts, budget.MaxRetries) == application.Retry && totalAttempts < attemptLimit {
+				s.observe(toolCtx, application.RuntimeObservation{RunID: plan.RunID, WorkerID: step.WorkerID, ToolID: step.ToolID, Phase: "retry", RetryDecision: string(application.Retry), Attempt: step.Attempts, Duration: time.Since(workerStarted)})
 				step.AttemptStatus = "failed_pre_call"
 				if err := s.deps.Repository.SavePlan(plan); err != nil {
 					return err
@@ -485,6 +574,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		return s.terminateLocked(&plan, agent.RunFailed, code, "能力执行失败")
 	}
 	result := workerResult.Content
+	s.observe(toolCtx, application.RuntimeObservation{RunID: plan.RunID, WorkerID: step.WorkerID, ToolID: step.ToolID, Phase: "tool.success", Attempt: step.Attempts, Duration: time.Since(workerStarted)})
 	if observedCtxErr != nil {
 		return s.markOutcomeUnknownLocked(&plan, step)
 	}
@@ -510,7 +600,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if err != nil {
 		return err
 	}
-	if err := s.saveCheckpointLocked(plan, version); err != nil {
+	if err := s.saveCheckpointLocked(plan, version, workerResult.Checkpoint); err != nil {
 		return err
 	}
 	if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "succeeded", "step_id": step.StepID}); err != nil {
@@ -524,11 +614,50 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	}
 	// A successful step is durable before the next step is selected. The
 	// manager, not the Runner, owns ordered progression and terminal projection.
+	if next := nextStepIndex(plan); next >= 0 && next < len(plan.Steps) && (plan.Steps[next].WorkerID != step.WorkerID || plan.Steps[next].ToolID != step.ToolID) {
+		// Bounded handoff: only the prior result becomes the next step's message,
+		// capped before it reaches the next registered Tool.
+		plan.Steps[next].Input = map[string]string{"message": boundedHandoff(result)}
+	}
 	plan.Status = agent.RunPending
 	if err := s.deps.Repository.SavePlan(plan); err != nil {
 		return err
 	}
 	return s.executeLocked(ctx, plan)
+}
+
+func decisionCandidates(decision agent.SupervisorDecision) []agent.CandidateStep {
+	if len(decision.Steps) > 0 {
+		return append([]agent.CandidateStep(nil), decision.Steps...)
+	}
+	return []agent.CandidateStep{{WorkerID: decision.WorkerID, Intent: decision.Intent, Arguments: cloneMap(decision.Arguments), Risk: decision.Risk}}
+}
+
+func decisionStepCount(decision agent.SupervisorDecision) int {
+	if len(decision.Steps) > 0 {
+		return len(decision.Steps)
+	}
+	return 1
+}
+
+// toolInput keeps route metadata out of the Tool payload. Policy evaluates the
+// full candidate, while the approved Tool receives only its declared inputs.
+func toolInput(arguments map[string]string) map[string]string {
+	input := make(map[string]string, len(arguments))
+	for key, value := range arguments {
+		if key != "tool_id" {
+			input[key] = value
+		}
+	}
+	return input
+}
+
+func boundedHandoff(value string) string {
+	const max = 512
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
 }
 
 // markOutcomeUnknownLocked records that the external call started but its result
@@ -620,6 +749,19 @@ func (s *Service) workerRunner() application.WorkerRunner {
 	return nil
 }
 
+func (s *Service) observe(ctx context.Context, observation application.RuntimeObservation) {
+	if s != nil && s.deps.Observer != nil {
+		s.deps.Observer.Observe(ctx, observation)
+	}
+}
+
+func classifyRuntimeError(err error) application.ErrorClass {
+	if err == nil {
+		return ""
+	}
+	return (DefaultErrorPolicy{}).Classify(err, application.PhaseInFlight)
+}
+
 func (s *Service) budget() application.ExecutionBudget {
 	budget := s.deps.Budget
 	if budget.MaxPlanSteps <= 0 {
@@ -687,9 +829,17 @@ func (s *Service) authorize(ctx context.Context, subject, owner identity.Subject
 }
 
 // saveCheckpointLocked 保存恢复所需的最小快照。
-func (s *Service) saveCheckpointLocked(plan agent.ExecutionPlan, version int64) error {
+func (s *Service) saveCheckpointLocked(plan agent.ExecutionPlan, version int64, runnerToken ...string) error {
 	status := plan.Status
 	returnValue := agent.Checkpoint{RunID: plan.RunID, PlanID: plan.PlanID, Status: status, Version: version, SavedAt: s.now()}
+	if previous, found, err := s.loadCheckpoint(plan.RunID); err != nil {
+		return err
+	} else if found {
+		returnValue.RunnerToken = previous.RunnerToken
+	}
+	if len(runnerToken) > 0 {
+		returnValue.RunnerToken = runnerToken[0]
+	}
 	for _, step := range plan.Steps {
 		if step.Status == agent.StepSucceeded {
 			returnValue.CompletedStepIDs = append(returnValue.CompletedStepIDs, step.StepID)
@@ -699,7 +849,12 @@ func (s *Service) saveCheckpointLocked(plan agent.ExecutionPlan, version int64) 
 			break
 		}
 	}
-	_, err := s.deps.Checkpoint.Save(returnValue)
+	var err error
+	if store, ok := s.deps.Checkpoint.(application.ContextCheckpointStore); ok {
+		_, err = store.SaveContext(s.operationContext(), returnValue)
+	} else {
+		_, err = s.deps.Checkpoint.Save(returnValue)
+	}
 	return err
 }
 
@@ -710,12 +865,17 @@ func (s *Service) failLocked(runID, code, message string) error {
 
 // terminateLocked 收口失败或取消分支，确保计划、checkpoint 和终态事件一致。
 func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunStatus, code agent.ErrorCode, message string) error {
+	previousContext := s.ctx
+	s.ctx = context.WithoutCancel(s.operationContext())
+	defer func() { s.ctx = previousContext }()
+	terminalStepID := ""
 	if !agent.IsTerminal(plan.Status) && len(plan.Steps) > 0 {
 		stepIndex := nextStepIndex(*plan)
 		if stepIndex < 0 {
 			return plan.MarkTerminal(status, code)
 		}
 		step := &plan.Steps[stepIndex]
+		terminalStepID = step.StepID
 		if step.Status != agent.StepSucceeded && step.Status != agent.StepFailed && step.Status != agent.StepCanceled {
 			next := agent.StepFailed
 			if status == agent.RunCanceled {
@@ -743,7 +903,11 @@ func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunSta
 	if status == agent.RunCanceled {
 		eventType = agent.Canceled
 	}
-	if err := s.emitLocked(plan.RunID, eventType, map[string]string{"code": string(code), "message": message}); err != nil {
+	terminalData := map[string]string{"code": string(code), "message": message}
+	if terminalStepID != "" {
+		terminalData["step_id"] = terminalStepID
+	}
+	if err := s.emitLocked(plan.RunID, eventType, terminalData); err != nil {
 		return err
 	}
 	return &Error{Code: code, Message: message}
@@ -751,8 +915,18 @@ func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunSta
 
 // emitLocked 按已持久化事件生成稳定 ID；事件顺序由 EventStore 再次校验。
 func (s *Service) emitLocked(runID string, eventType agent.EventType, data map[string]string) error {
-	eventID := fmt.Sprintf("%s:event:%d", runID, len(s.deps.EventBus.Events(runID))+1)
-	_, err := s.deps.EventBus.Append(agent.RunEvent{EventID: eventID, RunID: runID, Type: eventType, OccurredAt: s.now(), Data: cloneMap(data), RedactionClass: "public"})
+	ctx := s.operationContext()
+	events := s.deps.EventBus.Events(runID)
+	if store, ok := s.deps.EventBus.(application.ContextEventStore); ok {
+		events = store.EventsContext(ctx, runID)
+	}
+	eventID := fmt.Sprintf("%s:event:%d", runID, len(events)+1)
+	event := agent.RunEvent{EventID: eventID, RunID: runID, Type: eventType, OccurredAt: s.now(), Data: cloneMap(data), RedactionClass: "public"}
+	if store, ok := s.deps.EventBus.(application.ContextEventStore); ok {
+		_, err := store.AppendContext(ctx, event)
+		return err
+	}
+	_, err := s.deps.EventBus.Append(event)
 	return err
 }
 

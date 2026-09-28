@@ -4,11 +4,26 @@
 package eventbus
 
 import (
+	"context"
 	"errors"
 	"sync"
 
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
+
+func (b *MemoryBus) AppendContext(ctx context.Context, event RunEvent) (RunEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return RunEvent{}, err
+	}
+	return b.Append(event)
+}
+
+func (b *MemoryBus) EventsContext(ctx context.Context, runID string) []RunEvent {
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
+	return b.Events(runID)
+}
 
 // EventType、RunEvent 和事件常量沿用领域合同，避免基础设施重新定义语义。
 type EventType = agent.EventType

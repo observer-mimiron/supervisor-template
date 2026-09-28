@@ -85,6 +85,18 @@ type SupervisorDecision struct {
 	Arguments  map[string]string
 	Risk       Risk
 	Confidence float64
+	// Steps is an optional finite ordered candidate plan. An empty value keeps
+	// the original single-route contract compatible with existing callers.
+	Steps []CandidateStep
+}
+
+// CandidateStep is model-proposed data only; Application re-runs Policy Gate
+// for every step before it becomes part of an ExecutionPlan.
+type CandidateStep struct {
+	WorkerID  string
+	Intent    string
+	Arguments map[string]string
+	Risk      Risk
 }
 
 // ApprovedRoute 是策略门控后的确定性路由结果。
@@ -198,6 +210,7 @@ type Checkpoint struct {
 	PlanID           string
 	NextStepID       string
 	CompletedStepIDs []string
+	RunnerToken      string
 	Status           RunStatus
 	Version          int64
 	SavedAt          time.Time

@@ -15,3 +15,14 @@ func Contracts() []domaintool.Contract { return ContractsFor(examplebusiness.Rea
 func ContractsFor(userQueryImplementation string) []domaintool.Contract {
 	return examplebusiness.ToolContracts(userQueryImplementation)
 }
+
+// ContractsForMySQL adds the optional database Tool contracts to the fixed
+// example registry. It is selected only during startup when a MySQL adapter is
+// actually configured.
+func ContractsForMySQL(userQueryImplementation string) []domaintool.Contract {
+	contracts := ContractsFor(userQueryImplementation)
+	return append(contracts,
+		domaintool.Contract{ToolID: examplebusiness.MySQLQueryToolID, Implementation: examplebusiness.MySQLQueryImpl, Risk: "read_only", RetryLimit: 1, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 64 << 10},
+		domaintool.Contract{ToolID: examplebusiness.MySQLInsertToolID, Implementation: examplebusiness.MySQLInsertImpl, Risk: "side_effect", RequiresApproval: true, IdempotencyRequired: true, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 64 << 10},
+	)
+}

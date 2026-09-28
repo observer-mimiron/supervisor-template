@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -81,6 +82,17 @@ func TestNewDeepSeekSupervisorUsesOfficialAdapterAgainstLocalEndpoint(t *testing
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Fatalf("authorization = %q", got)
+		}
+		var request struct {
+			Thinking struct {
+				Type string `json:"type"`
+			} `json:"thinking"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode model request: %v", err)
+		}
+		if request.Thinking.Type != "disabled" {
+			t.Fatalf("thinking.type = %q, want disabled", request.Thinking.Type)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"local","object":"chat.completion","created":1,"model":"deepseek-chat","choices":[{"index":0,"message":{"role":"assistant","content":"{\"decision_id\":\"model\",\"worker_id\":\"user_analysis\",\"intent\":\"query\",\"arguments\":{\"tool_id\":\"user_query\",\"message\":\"分析\"},\"risk\":\"read_only\",\"confidence\":0.8}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":8,"total_tokens":12}}`))

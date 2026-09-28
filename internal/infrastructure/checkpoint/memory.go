@@ -4,11 +4,26 @@
 package checkpoint
 
 import (
+	"context"
 	"errors"
 	"sync"
 
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
+
+func (s *MemoryStore) SaveContext(ctx context.Context, snapshot agent.Checkpoint) (agent.Checkpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.Checkpoint{}, err
+	}
+	return s.Save(snapshot)
+}
+
+func (s *MemoryStore) GetContext(ctx context.Context, runID string) (agent.Checkpoint, bool) {
+	if err := ctx.Err(); err != nil {
+		return agent.Checkpoint{}, false
+	}
+	return s.Get(runID)
+}
 
 // MemoryStore 保存每个 run 的最新 checkpoint。
 type MemoryStore struct {

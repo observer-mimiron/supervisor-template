@@ -35,6 +35,7 @@ type ApprovalInput struct {
 type EventEnvelope struct {
 	EventID  string            `json:"event_id"`
 	RunID    string            `json:"run_id"`
+	TraceID  string            `json:"trace_id,omitempty"`
 	Sequence int64             `json:"sequence"`
 	Type     agent.EventType   `json:"type"`
 	Data     map[string]string `json:"data,omitempty"`
@@ -44,6 +45,7 @@ type EventEnvelope struct {
 func NewRouter(service *run.Service, health application.HealthService, authenticator application.Authenticator) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Recovery())
+	router.Use(traceMiddleware())
 	router.GET("/healthz", func(c *gin.Context) {
 		if !health.Healthy() {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy"})
@@ -196,6 +198,7 @@ func writeEvents(c *gin.Context, events []agent.RunEvent) {
 		payload, err := json.Marshal(EventEnvelope{
 			EventID:  event.EventID,
 			RunID:    event.RunID,
+			TraceID:  traceID(c),
 			Sequence: event.Sequence,
 			Type:     event.Type,
 			Data:     redactEventData(event.Data),

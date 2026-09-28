@@ -26,6 +26,11 @@ type FakeSupervisor struct {
 	routes []FakeRoute
 }
 
+const fixedAudienceQuery = "{\"as_of\":\"2026-09-25\"}"
+const fixedAudienceProjection = "{\"count\":4,\"customer_ids\":[\"cust-001\",\"cust-002\",\"cust-006\",\"cust-008\"],\"spend_365d_total\":6200}"
+const fixedOrderQuery = "{\"user_id\":1}"
+const fixedOrderInsert = "{\"user_id\":1,\"product_id\":1,\"quantity\":1,\"total_amount\":\"19.90\"}"
+
 // NewFakeSupervisor 创建确定性 fake Supervisor。
 func NewFakeSupervisor(routes ...FakeRoute) *FakeSupervisor {
 	if len(routes) == 0 {
@@ -70,12 +75,42 @@ func (s *FakeSupervisor) Decide(_ context.Context, request conversation.Executio
 	if strings.Contains(message, "未知能力") {
 		route.ToolID = "not_registered"
 	}
-	return agent.SupervisorDecision{
+	toolMessage := message
+	switch route.ToolID {
+	case examplebusiness.ReadOnlyToolID:
+		toolMessage = fixedAudienceQuery
+	case examplebusiness.SummaryToolID, examplebusiness.SideEffectToolID:
+		toolMessage = fixedAudienceProjection
+	case examplebusiness.MySQLQueryToolID:
+		toolMessage = fixedOrderQuery
+	case examplebusiness.MySQLInsertToolID:
+		toolMessage = fixedOrderInsert
+	}
+	decision := agent.SupervisorDecision{
 		DecisionID: request.RunID + ":decision",
 		WorkerID:   route.WorkerID,
 		Intent:     route.Intent,
-		Arguments:  map[string]string{"tool_id": route.ToolID, "message": message},
+		Arguments:  map[string]string{"tool_id": route.ToolID, "message": toolMessage},
 		Risk:       route.Risk,
 		Confidence: 1,
-	}, nil
+	}
+	// The example multi-worker fixture is intentionally explicit and bounded:
+	// it is a serial two-step candidate, never an open-ended model loop.
+	if isSerialExample(message) {
+		first, firstOK := examplebusiness.RouteFor(examplebusiness.ReadOnlyToolID)
+		second, secondOK := examplebusiness.RouteFor(examplebusiness.SummaryToolID)
+		if firstOK && secondOK {
+			decision.Steps = []agent.CandidateStep{
+				{WorkerID: first.WorkerID, Intent: first.Intent, Arguments: map[string]string{"tool_id": first.ToolID, "message": fixedAudienceQuery}, Risk: first.Risk},
+				{WorkerID: second.WorkerID, Intent: second.Intent, Arguments: map[string]string{"tool_id": second.ToolID, "message": fixedAudienceProjection}, Risk: second.Risk},
+			}
+			decision.WorkerID, decision.Intent = first.WorkerID, first.Intent
+			decision.Arguments, decision.Risk = decision.Steps[0].Arguments, decision.Steps[0].Risk
+		}
+	}
+	return decision, nil
+}
+
+func isSerialExample(message string) bool {
+	return (strings.Contains(message, "串行") || strings.Contains(message, "多步骤") || strings.Contains(message, "先") && strings.Contains(message, "再")) && !strings.Contains(message, "未知能力")
 }

@@ -9,18 +9,13 @@ idle_timeout = "60s"
 request_body_limit = 1048576
 sse_heartbeat = "15s"
 
-[server.middleware]
-recovery = true
-request_id = true
-cors = false
-rate_limit = false
-pprof = false
-prometheus = false
-
 [model]
-provider = "fake"
-name = "fake-model"
-base_url = ""
+# 默认使用 DeepSeek；启动入口会加载同目录 .env，环境变量仍可覆盖。
+# 离线 fake smoke 必须显式使用：go run ./cmd/server/ -f ./config.example.toml -fake
+provider = "deepseek"
+name = "deepseek-chat"
+base_url = "https://api.deepseek.com"
+# 这里只填环境变量名，不要填 API key 本身。
 api_key_env = "LLM_API_KEY"
 temperature = 0.2
 max_tokens = 1024
@@ -35,19 +30,34 @@ token_sha256_env = "AGENT_AUTH_DEMO_TOKEN_SHA256"
 tenant_id = "demo-tenant"
 subject_id = "demo-user"
 
+[[auth.credentials]]
+# Local evaluation uses a derived token for this second synthetic subject.
+token_sha256_env = "AGENT_AUTH_DEMO_TOKEN_2_SHA256"
+tenant_id = "demo-tenant"
+subject_id = "demo-user-2"
+
 [agent.supervisor]
 enabled = true
 implementation = "eino.chat_model_agent"
 prompt_file = "prompts/supervisor.md"
-allowed_workers = ["user_analysis"]
+allowed_workers = ["user_analysis", "user_summary"]
 max_steps = 8
 
 [agent.workers.user_analysis]
 enabled = true
 implementation = "fake.user_analysis"
 runner = "single_tool"
+# 可选：eino_adk（需要真实 ToolCallingChatModel，例如 deepseek）
 prompt_file = "prompts/user_analysis.md"
 allowed_tools = ["user_query", "simulated_outreach"]
+timeout = "20s"
+
+[agent.workers.user_summary]
+enabled = true
+implementation = "fake.user_summary"
+runner = "single_tool"
+prompt_file = "prompts/user_summary.md"
+allowed_tools = ["user_summary_query"]
 timeout = "20s"
 
 [agent.routes.user_query]
@@ -63,6 +73,13 @@ intent = "user_analysis"
 matches = ["触达", "发送", "模拟写入"]
 tool = "simulated_outreach"
 risk = "side_effect"
+
+[agent.routes.user_summary_query]
+worker = "user_summary"
+intent = "summarize_user_analysis"
+matches = ["总结", "汇总"]
+tool = "user_summary_query"
+risk = "read_only"
 
 [tools.user_query]
 enabled = true
@@ -80,6 +97,13 @@ requires_approval = true
 timeout = "5s"
 max_retries = 0
 
+[tools.user_summary_query]
+enabled = true
+implementation = "fake.user_summary_query"
+risk = "read_only"
+timeout = "5s"
+max_retries = 1
+
 [limits]
 max_plan_steps = 8
 max_tool_calls = 12
@@ -93,6 +117,13 @@ idempotency_window = "24h"
 [checkpoint]
 retention = "24h"
 
+# Optional local MySQL example. Go still runs on the host; Compose only starts the dependency.
+[mysql]
+enabled = false
+dsn_env = "MYSQL_ORDER_DSN"
+auto_migrate = false
+seed = false
+
 [observability]
 enabled = false
 endpoint = ""
@@ -101,3 +132,14 @@ insecure = false
 log_level = "info"
 trace_sample_rate = 0.1
 metrics_enabled = true
+# Optional local evidence. Secrets/Authorization are supplied by environment variables.
+log_file = "./var/agent.log.jsonl"
+trace_file = "./var/agent.trace.jsonl"
+file_mode = "0600"
+rotate_max_bytes = 10485760
+rotate_daily = true
+retention_files = 5
+resource_attributes = { environment = "local" }
+langfuse_enabled = false
+langfuse_endpoint = ""
+langfuse_headers_env = "OTEL_EXPORTER_OTLP_HEADERS"

@@ -5,6 +5,7 @@
 package checkpoint
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,27 @@ import (
 
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
+
+func (s *FileStore) SaveContext(ctx context.Context, snapshot agent.Checkpoint) (agent.Checkpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.Checkpoint{}, err
+	}
+	return s.Save(snapshot)
+}
+
+func (s *FileStore) GetContext(ctx context.Context, runID string) (agent.Checkpoint, bool) {
+	if err := ctx.Err(); err != nil {
+		return agent.Checkpoint{}, false
+	}
+	return s.Get(runID)
+}
+
+func (s *FileStore) GetWithContext(ctx context.Context, runID string) (agent.Checkpoint, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.Checkpoint{}, false, err
+	}
+	return s.GetWithError(runID)
+}
 
 const fileSchemaVersion = 1
 

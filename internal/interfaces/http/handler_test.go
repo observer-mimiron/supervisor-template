@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/application"
 	"github.com/observer-mimiron/supervisor-template/internal/composition"
 	"github.com/observer-mimiron/supervisor-template/internal/config"
+	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
+	einoinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/eino"
 	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
 
@@ -35,8 +39,11 @@ func TestChatProjectsReadOnlyRunAsOrderedSSE(t *testing.T) {
 	if !strings.HasPrefix(response.Header().Get("Content-Type"), "text/event-stream") {
 		t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
 	}
+	if response.Header().Get("X-Trace-ID") == "" || response.Header().Get("X-Request-ID") == "" {
+		t.Fatalf("trace/request response headers missing: %#v", response.Header())
+	}
 	output := response.Body.String()
-	if !strings.Contains(output, "event: completed") || !strings.Contains(output, "\"sequence\":1") {
+	if !strings.Contains(output, "event: completed") || !strings.Contains(output, "\"sequence\":1") || !strings.Contains(output, "\"trace_id\":\""+response.Header().Get("X-Trace-ID")+"\"") {
 		t.Fatalf("unexpected SSE output: %s", output)
 	}
 }
@@ -54,6 +61,27 @@ func TestChatFakeFlowCompletesWithinFiveSeconds(t *testing.T) {
 	}
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "event: completed") {
 		t.Fatalf("unexpected timed smoke response: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestChatSerialTwoWorkerFlowProjectsOrderedSteps(t *testing.T) {
+	router := newTestRouter(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"conversation_id":"demo","message":"先分析用户，再总结结果"}`))
+	request.Header.Set("Content-Type", "application/json")
+	withBearer(request)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, want := range []string{"\"step_count\":\"2\"", "\"step_1_worker_id\":\"user_analysis\"", "\"step_2_worker_id\":\"user_summary\"", "\"step_1_tool_id\":\"user_query\"", "\"step_2_tool_id\":\"user_summary_query\"", "event: completed"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("serial flow missing %q: %s", want, body)
+		}
+	}
+	if strings.Index(body, "user_query") > strings.Index(body, "user_summary_query") {
+		t.Fatalf("serial SSE order reversed: %s", body)
 	}
 }
 
@@ -172,6 +200,163 @@ func TestApprovalAndResumeAreSeparateHTTPSteps(t *testing.T) {
 	}
 }
 
+func TestEinoSelectedHTTPApprovalAndResumeStayApplicationOwned(t *testing.T) {
+	var supervisorCalls, workerCalls atomic.Int32
+	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" || r.Header.Get("Authorization") != "Bearer integration-key" {
+			http.Error(w, "unexpected model request", http.StatusBadRequest)
+			return
+		}
+		var input struct {
+			Tools    []json.RawMessage `json:"tools"`
+			Stream   bool              `json:"stream"`
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			http.Error(w, "invalid model request", http.StatusBadRequest)
+			return
+		}
+		message := map[string]any{"role": "assistant"}
+		finishReason := "stop"
+		hasToolResult := false
+		for _, message := range input.Messages {
+			hasToolResult = hasToolResult || message.Role == "tool"
+		}
+		if len(input.Tools) == 0 {
+			supervisorCalls.Add(1)
+			message["content"] = `{"decision_id":"model","worker_id":"user_analysis","intent":"user_analysis","arguments":{"tool_id":"simulated_outreach","message":"{\"count\":4,\"customer_ids\":[\"cust-001\",\"cust-002\",\"cust-006\",\"cust-008\"],\"spend_365d_total\":6200}"},"risk":"side_effect","confidence":0.9}`
+		} else if hasToolResult {
+			message["content"] = "已模拟触达示例用户"
+		} else {
+			workerCalls.Add(1)
+			message["content"] = nil
+			message["tool_calls"] = []any{map[string]any{
+				"id": "call-1", "type": "function",
+				"function": map[string]string{"name": "simulated_outreach", "arguments": `{"tool_id":"simulated_outreach","message":"{\"count\":4,\"customer_ids\":[\"cust-001\",\"cust-002\",\"cust-006\",\"cust-008\"],\"spend_365d_total\":6200}"}`},
+			}}
+			call := message["tool_calls"].([]any)[0].(map[string]any)
+			function := call["function"].(map[string]string)
+			function["arguments"] = strings.Replace(function["arguments"], `{"tool_id":"simulated_outreach",`, `{`, 1)
+			finishReason = "tool_calls"
+		}
+		if input.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			writeChunk := func(delta map[string]any, finish string) {
+				chunk, _ := json.Marshal(map[string]any{
+					"id": "local", "object": "chat.completion.chunk", "created": 1, "model": "deepseek-chat",
+					"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}},
+				})
+				_, _ = w.Write(append(append([]byte("data: "), chunk...), '\n', '\n'))
+			}
+			writeChunk(map[string]any{"role": "assistant"}, "")
+			delta := map[string]any{}
+			if calls, ok := message["tool_calls"]; ok {
+				delta["tool_calls"] = calls
+			} else if content, ok := message["content"]; ok {
+				delta["content"] = content
+			}
+			writeChunk(delta, finishReason)
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "local", "object": "chat.completion", "created": 1, "model": "deepseek-chat",
+			"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finishReason}},
+			"usage":   map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	defer modelServer.Close()
+	t.Setenv("TEST_EINO_LLM_API_KEY", "integration-key")
+	t.Setenv("AGENT_AUTH_DEMO_TOKEN_SHA256", tokenSHA256("test-token"))
+	cfg, err := config.Load(filepath.Join("..", "..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Model.Provider = "deepseek"
+	cfg.Model.Name = "deepseek-chat"
+	cfg.Model.BaseURL = modelServer.URL
+	cfg.Model.APIKeyEnv = "TEST_EINO_LLM_API_KEY"
+	cfg.Agent.Supervisor.PromptFile = filepath.Join("..", "..", "..", "prompts", "supervisor.md")
+	worker := cfg.Agent.Workers["user_analysis"]
+	worker.Runner = "eino_adk"
+	cfg.Agent.Workers["user_analysis"] = worker
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	app, err := composition.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close(context.Background())
+	router := NewRouter(app.Run, app.Health, app.Authenticator)
+	dispatcher, ok := app.Health.Dependencies.Runner.(*composition.WorkerRunnerDispatcher)
+	if !ok {
+		t.Fatalf("runner dispatcher = %T", app.Health.Dependencies.Runner)
+	}
+	if runner, ok := dispatcher.RunnerFor("user_analysis"); !ok {
+		t.Fatal("Eino-selected Worker was not registered")
+	} else if _, ok := runner.(*einoinfra.Runner); !ok {
+		t.Fatalf("selected Worker runner = %T, want *eino.Runner", runner)
+	}
+	registry, ok := app.Health.Dependencies.Tools.(*toolinfra.Registry)
+	if !ok {
+		t.Fatalf("Tool executor = %T, want *tool.Registry", app.Health.Dependencies.Tools)
+	}
+	send := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		withBearer(req)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		return response
+	}
+	create := func(runID string) *httptest.ResponseRecorder {
+		return send(http.MethodPost, "/api/chat", `{"run_id":"`+runID+`","conversation_id":"demo","message":"模拟触达示例用户"}`)
+	}
+	if response := create("run-eino-reject"); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "approval_required") {
+		t.Fatalf("initial approval response = %d %s", response.Code, response.Body.String())
+	}
+	if supervisorCalls.Load() != 1 || workerCalls.Load() != 0 || registry.OutreachCount() != 0 {
+		t.Fatalf("pending Eino run executed early: supervisor=%d worker=%d writes=%d", supervisorCalls.Load(), workerCalls.Load(), registry.OutreachCount())
+	}
+	if response := send(http.MethodPost, "/api/runs/run-eino-reject/approval", `{"decision":"reject"}`); response.Code != http.StatusOK {
+		t.Fatalf("reject response = %d %s", response.Code, response.Body.String())
+	}
+	rejected := app.Run.Events("run-eino-reject")
+	if len(rejected) == 0 || rejected[len(rejected)-1].Type != agent.Failed || workerCalls.Load() != 0 || registry.OutreachCount() != 0 {
+		t.Fatalf("rejected Eino run executed: events=%#v worker=%d writes=%d", rejected, workerCalls.Load(), registry.OutreachCount())
+	}
+	if response := create("run-eino-approve"); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "approval_required") {
+		t.Fatalf("second approval response = %d %s", response.Code, response.Body.String())
+	}
+	if response := send(http.MethodPost, "/api/runs/run-eino-approve/approval", `{"decision":"approve"}`); response.Code != http.StatusOK {
+		t.Fatalf("approve response = %d %s", response.Code, response.Body.String())
+	}
+	for i := 0; i < 2; i++ {
+		response := send(http.MethodPost, "/api/runs/run-eino-approve/resume", "")
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "event: completed") {
+			t.Fatalf("resume %d response = %d %s (supervisor=%d worker=%d writes=%d)", i, response.Code, response.Body.String(), supervisorCalls.Load(), workerCalls.Load(), registry.OutreachCount())
+		}
+	}
+	if workerCalls.Load() != 1 || registry.OutreachCount() != 1 {
+		t.Fatalf("approved Eino step replayed: worker=%d writes=%d", workerCalls.Load(), registry.OutreachCount())
+	}
+	terminalCount := 0
+	for _, event := range app.Run.Events("run-eino-approve") {
+		if event.Type == agent.Completed || event.Type == agent.Failed || event.Type == agent.Canceled {
+			terminalCount++
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("terminal event count = %d", terminalCount)
+	}
+}
+
 func TestCancelProjectsCanceledSSE(t *testing.T) {
 	router := newTestRouter(t)
 	body := "{\"conversation_id\":\"demo\",\"run_id\":\"run-http-cancel\",\"message\":\"模拟触达示例用户\"}"
@@ -225,9 +410,17 @@ func TestArbitraryUnmatchedMessageDoesNotCallReadOnlyTool(t *testing.T) {
 	if strings.Contains(response.Body.String(), "event: tool_call") {
 		t.Fatalf("unmatched message entered Tool execution: %s", response.Body.String())
 	}
-	runner, ok := app.Health.Dependencies.Runner.(application.SingleToolRunner)
+	dispatcher, ok := app.Health.Dependencies.Runner.(*composition.WorkerRunnerDispatcher)
 	if !ok {
-		t.Fatal("composition did not install SingleToolRunner")
+		t.Fatal("composition did not install WorkerRunnerDispatcher")
+	}
+	runnerValue, ok := dispatcher.RunnerFor("user_analysis")
+	if !ok {
+		t.Fatal("composition did not install user_analysis runner")
+	}
+	runner, ok := runnerValue.(application.SingleToolRunner)
+	if !ok {
+		t.Fatalf("composition installed runner %T, want SingleToolRunner", runnerValue)
 	}
 	registry, ok := runner.Tools.(*toolinfra.Registry)
 	if !ok {
@@ -252,6 +445,7 @@ func newTestRouterWithApp(t *testing.T) (*gin.Engine, *composition.App) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.Model.Provider = "fake"
 	cfg.Auth.Credentials = append(cfg.Auth.Credentials, config.BearerCredential{
 		TokenSHA256Env: "AGENT_AUTH_OTHER_TOKEN_SHA256",
 		TenantID:       "other-tenant",
@@ -275,4 +469,28 @@ func withBearerToken(request *http.Request, token string) {
 func tokenSHA256(token string) string {
 	digest := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(digest[:])
+}
+
+func TestChatProjectsSyntheticAudienceAndSummaryResults(t *testing.T) {
+	router := newTestRouter(t)
+	requests := []string{
+		`{"conversation_id":"demo","message":"分析沉睡客户召回客群"}`,
+		`{"conversation_id":"demo","message":"先分析沉睡客户，再总结结果"}`,
+	}
+	for _, body := range requests {
+		request := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		withBearer(request)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+		output := response.Body.String()
+		for _, want := range []string{`"count\":4`, `cust-001`, `cust-008`, `"spend_365d_total\":6200`, "event: completed"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("response missing %q: %s", want, output)
+			}
+		}
+	}
 }

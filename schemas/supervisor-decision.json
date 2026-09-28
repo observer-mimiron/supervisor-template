@@ -10,7 +10,23 @@
     "intent": {"type": "string", "minLength": 1},
     "arguments": {"type": "object", "additionalProperties": {"type": "string"}},
     "risk": {"enum": ["read_only", "side_effect"]},
-    "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "required": ["worker_id", "intent", "arguments", "risk"],
+        "properties": {
+          "worker_id": {"type": "string", "minLength": 1},
+          "intent": {"type": "string", "minLength": 1},
+          "arguments": {"type": "object", "additionalProperties": {"type": "string"}},
+          "risk": {"enum": ["read_only", "side_effect"]}
+        },
+        "additionalProperties": false
+      }
+    }
   },
   "additionalProperties": false
 }

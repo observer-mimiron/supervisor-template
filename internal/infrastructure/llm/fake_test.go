@@ -6,6 +6,7 @@ import (
 
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 )
 
 func TestFakeSupervisorUsesConfiguredRoute(t *testing.T) {
@@ -52,5 +53,37 @@ func TestFakeSupervisorRejectsArbitraryUnmatchedMessageAsUnknownRoute(t *testing
 	}
 	if decision.Arguments["tool_id"] != "not_registered" {
 		t.Fatalf("unmatched message defaulted to tool %q", decision.Arguments["tool_id"])
+	}
+}
+
+func TestFakeSupervisorUsesStrictMySQLFixtures(t *testing.T) {
+	supervisor := NewFakeSupervisor(FakeRoute{
+		WorkerID: examplebusiness.MySQLWorkerID,
+		Intent:   examplebusiness.MySQLWorkerID,
+		Matches:  []string{"查询订单"},
+		ToolID:   examplebusiness.MySQLQueryToolID,
+		Risk:     agent.RiskReadOnly,
+	})
+	decision, err := supervisor.Decide(context.Background(), conversation.ExecutionRequest{RunID: "mysql-query", Message: "查询订单"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Arguments["message"] != fixedOrderQuery {
+		t.Fatalf("mysql query payload = %q", decision.Arguments["message"])
+	}
+}
+
+func TestFakeSupervisorUsesProjectionForSideEffect(t *testing.T) {
+	decision, err := NewFakeSupervisor().Decide(context.Background(), conversation.ExecutionRequest{
+		RunID: "outreach-payload", Message: "模拟触达示例用户",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Arguments["tool_id"] != examplebusiness.SideEffectToolID {
+		t.Fatalf("tool id = %q", decision.Arguments["tool_id"])
+	}
+	if decision.Arguments["message"] != fixedAudienceProjection {
+		t.Fatalf("side-effect payload = %q", decision.Arguments["message"])
 	}
 }

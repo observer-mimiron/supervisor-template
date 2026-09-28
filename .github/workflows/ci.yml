@@ -1,0 +1,24 @@
+name: go-ci
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-latest
+    env:
+      MODEL_PROVIDER: fake
+      PR_RISK_LEVEL: ${{ vars.PR_RISK_LEVEL }}
+      PR_IMPACT_TAGS: ${{ vars.PR_IMPACT_TAGS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run ./cmd/archcheck
+      - run: go test ./...
+      - run: go test ./eval/...
+      # PR_RISK_LEVEL/PR_IMPACT_TAGS are explicit repository inputs; missing risk is fail-safe full.
+      - run: go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v1.json -report ./tmp/eval-report-ci.json -code-version ${{ github.sha }} -config ./config.example.toml -risk "${PR_RISK_LEVEL:-high}" -impact-tags "${PR_IMPACT_TAGS:-}"
+      # Required checks and human reviewers must still be enabled in repository settings.

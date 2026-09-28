@@ -21,6 +21,7 @@ type RuntimeCatalog struct {
 	tools      map[string]ToolConfig
 	routes     map[string]RouteConfig
 	limits     LimitsConfig
+	mysql      MySQLConfig
 }
 
 func (c RuntimeCatalog) Supervisor() SupervisorConfig     { return cloneSupervisor(c.supervisor) }
@@ -28,6 +29,7 @@ func (c RuntimeCatalog) Workers() map[string]WorkerConfig { return cloneWorkers(
 func (c RuntimeCatalog) Tools() map[string]ToolConfig     { return cloneTools(c.tools) }
 func (c RuntimeCatalog) Routes() map[string]RouteConfig   { return cloneRoutes(c.routes) }
 func (c RuntimeCatalog) Limits() LimitsConfig             { return c.limits }
+func (c RuntimeCatalog) MySQL() MySQLConfig               { return c.mysql }
 
 // CompileRuntimeCatalog 校验并编译所有启动引用；编译后运行时不再读取 Config map。
 func (c Config) CompileRuntimeCatalog() (RuntimeCatalog, error) {
@@ -56,6 +58,7 @@ func (c Config) CompileRuntimeCatalog() (RuntimeCatalog, error) {
 		tools:      cloneTools(c.Tools),
 		routes:     cloneRoutes(c.Agent.Routes),
 		limits:     c.Limits,
+		mysql:      c.MySQL,
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,6 +9,10 @@ import (
 )
 
 func TestLoadExampleConfig(t *testing.T) {
+	t.Setenv("MODEL_PROVIDER", "")
+	t.Setenv("LLM_MODEL", "")
+	t.Setenv("LLM_BASE_URL", "")
+	t.Setenv("FAKE_MODEL", "")
 	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
 	if err != nil {
 		t.Fatal(err)
@@ -17,6 +22,9 @@ func TestLoadExampleConfig(t *testing.T) {
 	}
 	if _, ok := cfg.Agent.Routes["user_query"]; !ok {
 		t.Fatalf("configured routes = %#v", cfg.Agent.Routes)
+	}
+	if cfg.Model.Provider != "deepseek" || cfg.Model.Name != "deepseek-chat" || cfg.Model.BaseURL != "https://api.deepseek.com" {
+		t.Fatalf("example model defaults = %#v", cfg.Model)
 	}
 }
 
@@ -146,6 +154,17 @@ func TestLoadAppliesOnlyDocumentedEnvironmentOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[model]\nprovider = \"fake\"\nname = \"fake-model\"\napi_key = \"should-not-be-here\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "model.api_key") {
+		t.Fatalf("expected unknown field rejection, got %v", err)
+	}
+}
+
 func TestValidateRecognizesM3ProvidersAndRejectsMissingReadOnlyEndpoint(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
 	if err != nil {
@@ -176,5 +195,81 @@ func TestValidateRecognizesM3ProvidersAndRejectsMissingReadOnlyEndpoint(t *testi
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("configured read-only endpoint should validate: %v", err)
+	}
+}
+
+func TestValidateObservabilityBoundaries(t *testing.T) {
+	base, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		edit func(*Config)
+		want string
+	}{
+		{name: "endpoint scheme", edit: func(cfg *Config) { cfg.Observability.Endpoint = "ftp://collector" }, want: "http/https"},
+		{name: "log level", edit: func(cfg *Config) { cfg.Observability.LogLevel = "trace" }, want: "log_level"},
+		{name: "file mode", edit: func(cfg *Config) { cfg.Observability.FileMode = "0644" }, want: "file_mode"},
+		{name: "negative rotation", edit: func(cfg *Config) { cfg.Observability.RotateMaxBytes = -1 }, want: "轮转"},
+		{name: "langfuse endpoint required", edit: func(cfg *Config) { cfg.Observability.LangfuseEnabled = true }, want: "langfuse_endpoint"},
+		{name: "langfuse endpoint scheme", edit: func(cfg *Config) {
+			cfg.Observability.LangfuseEnabled = true
+			cfg.Observability.LangfuseEndpoint = "collector"
+		}, want: "langfuse_endpoint"},
+		{name: "langfuse header env", edit: func(cfg *Config) {
+			cfg.Observability.LangfuseEnabled = true
+			cfg.Observability.LangfuseEndpoint = "https://langfuse.test"
+			cfg.Observability.LangfuseHeadersEnv = "1HEADERS"
+		}, want: "langfuse_headers_env"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base
+			test.edit(&cfg)
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateObservabilityLangfuseConfig(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Observability.LangfuseEnabled = true
+	cfg.Observability.LangfuseEndpoint = "https://langfuse.test/api/public/otel"
+	cfg.Observability.LangfuseHeadersEnv = "LANGFUSE_AUTH"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid Langfuse config rejected: %v", err)
+	}
+}
+
+func TestValidateMySQLOptInBoundaries(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MySQL.Enabled {
+		t.Fatal("example config must keep MySQL disabled by default")
+	}
+	cfg.MySQL.DSNEnv = ""
+	cfg.Tools["mysql_order_query"] = ToolConfig{
+		Enabled: true, Implementation: "gorm.mysql_order_query", Risk: "read_only", Timeout: 5 * time.Second,
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mysql.enabled") {
+		t.Fatalf("expected MySQL tool without adapter rejection, got %v", err)
+	}
+
+	cfg.MySQL.Enabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mysql.dsn_env") {
+		t.Fatalf("expected missing MySQL DSN environment name rejection, got %v", err)
+	}
+
+	cfg.MySQL.DSNEnv = "MYSQL_ORDER_DSN"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid MySQL opt-in should validate: %v", err)
 	}
 }

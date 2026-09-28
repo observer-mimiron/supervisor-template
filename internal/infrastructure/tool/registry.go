@@ -11,6 +11,7 @@ import (
 	domaintool "github.com/observer-mimiron/supervisor-template/internal/domain/tool"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/mcp"
+	mysqlinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/persistence/mysql"
 )
 
 // Registry 是按实现 ID 分派的 ToolExecutor。
@@ -28,7 +29,7 @@ func NewRegistry(userQueryImplementation, endpoint string, timeout time.Duration
 }
 
 // NewRegistryWithMCP 创建 Tool 注册表，并可选接入已通过 allow-list 的 MCP client。
-func NewRegistryWithMCP(userQueryImplementation, endpoint string, timeout time.Duration, mcpClient *mcp.Client, mcpServer string) (*Registry, error) {
+func NewRegistryWithMCP(userQueryImplementation, endpoint string, timeout time.Duration, mcpClient *mcp.Client, mcpServer string, mysqlAdapters ...*mysqlinfra.Adapter) (*Registry, error) {
 	poolTimeout := timeout
 	if poolTimeout <= 0 {
 		poolTimeout = 30 * time.Second
@@ -42,7 +43,15 @@ func NewRegistryWithMCP(userQueryImplementation, endpoint string, timeout time.D
 		pool:      pool,
 		contracts: make(map[string]domaintool.Contract),
 	}
-	for _, contract := range ContractsFor(userQueryImplementation) {
+	contracts := ContractsFor(userQueryImplementation)
+	var mysqlAdapter *mysqlinfra.Adapter
+	if len(mysqlAdapters) > 0 {
+		mysqlAdapter = mysqlAdapters[0]
+		if mysqlAdapter != nil {
+			contracts = ContractsForMySQL(userQueryImplementation)
+		}
+	}
+	for _, contract := range contracts {
 		contract.RequiredInputs = append([]string(nil), contract.RequiredInputs...)
 		registry.contracts[contract.ToolID] = contract
 	}
@@ -50,6 +59,23 @@ func NewRegistryWithMCP(userQueryImplementation, endpoint string, timeout time.D
 		return registry.fake.Execute(ctx, examplebusiness.SideEffectToolID, input, key)
 	}); err != nil {
 		return nil, err
+	}
+	if err := registry.register(examplebusiness.SummaryToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
+		return registry.fake.Execute(ctx, examplebusiness.SummaryToolID, input, key)
+	}); err != nil {
+		return nil, err
+	}
+	if mysqlAdapter != nil {
+		if err := registry.register(examplebusiness.MySQLQueryToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
+			return mysqlAdapter.Query(ctx, []byte(input["message"]))
+		}); err != nil {
+			return nil, err
+		}
+		if err := registry.register(examplebusiness.MySQLInsertToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
+			return mysqlAdapter.Insert(ctx, []byte(input["message"]), key)
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if userQueryImplementation == "" || userQueryImplementation == examplebusiness.ReadOnlyToolFake {
 		if err := registry.register(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
@@ -107,6 +133,19 @@ func (r *Registry) register(toolID string, handler toolHandler) error {
 	return r.pool.Register(toolID, func(ctx context.Context, invocation ToolInvocation) (string, error) {
 		return handler(ctx, invocation.Input, invocation.IdempotencyKey)
 	})
+}
+
+// RegisterHandler attaches one startup-selected external handler to a contract
+// already known by the registry. Registration remains startup-only; callers
+// cannot add a new capability without first declaring its contract.
+func (r *Registry) RegisterHandler(toolID string, handler func(context.Context, map[string]string, string) (string, error)) error {
+	if r == nil || handler == nil {
+		return fmt.Errorf("Tool 注册表或 handler 未装配")
+	}
+	if _, ok := r.contracts[toolID]; !ok {
+		return fmt.Errorf("Tool %q 合同未注册", toolID)
+	}
+	return r.register(toolID, handler)
 }
 
 func cloneToolInput(input map[string]string) map[string]string {

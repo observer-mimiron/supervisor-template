@@ -4,10 +4,12 @@ Thumbs.db
 *.out
 *.test
 *.exe
-server
+/server
 coverage/
+var/
 dist/
 build/
+tmp/
 .env
 .env.*
 .idea/
@@ -17,9 +19,7 @@ agent-architecture-references/
 
 # Local planning and workspace artifacts
 AGENTS.md
-PROGRESS.md
 .agents/
 .specify/
-specs/
 go.work
 go.work.sum

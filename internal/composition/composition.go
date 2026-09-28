@@ -7,8 +7,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
@@ -19,6 +22,7 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/domain/operation"
 	authinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/auth"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/checkpoint"
+	einoinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/eino"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/eventbus"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/llm"
@@ -26,17 +30,52 @@ import (
 	memoryinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/memory"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/observability"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/persistence"
+	mysqlinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/persistence/mysql"
 	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
 
 // App 是进程级依赖图和启动健康状态。
 type App struct {
-	Config        config.Config
-	Authenticator application.Authenticator
-	Health        application.HealthService
-	Run           *runapp.Service
-	Memory        appmemory.Store
-	Close         func(context.Context) error
+	Config         config.Config
+	Logger         *slog.Logger
+	Authenticator  application.Authenticator
+	Health         application.HealthService
+	Run            *runapp.Service
+	Memory         appmemory.Store
+	Close          func(context.Context) error
+	snapshot       RuntimeSnapshot
+	fakeWriteCount func() int
+}
+
+// RuntimeSnapshot is the immutable startup capability view used by local
+// evaluation evidence. It contains only registered IDs and worker allow-lists.
+type RuntimeSnapshot struct {
+	ToolIDs     []string
+	WorkerTools map[string][]string
+}
+
+func (s RuntimeSnapshot) clone() RuntimeSnapshot {
+	clone := RuntimeSnapshot{ToolIDs: append([]string(nil), s.ToolIDs...), WorkerTools: make(map[string][]string, len(s.WorkerTools))}
+	for workerID, tools := range s.WorkerTools {
+		clone.WorkerTools[workerID] = append([]string(nil), tools...)
+	}
+	return clone
+}
+
+// RuntimeSnapshot returns a copy of the startup registration and policy view.
+func (a *App) RuntimeSnapshot() RuntimeSnapshot {
+	if a == nil {
+		return RuntimeSnapshot{}
+	}
+	return a.snapshot.clone()
+}
+
+// FakeWriteCount returns the process-local simulated side-effect count.
+func (a *App) FakeWriteCount() int {
+	if a == nil || a.fakeWriteCount == nil {
+		return 0
+	}
+	return a.fakeWriteCount()
 }
 
 // New 根据已校验配置创建依赖图，并选择内存/文件、fake/真实和 MCP 基础设施实现。
@@ -56,6 +95,56 @@ func New(cfg config.Config) (*App, error) {
 	defer func() {
 		if cleanup {
 			_ = observation.Shutdown(context.Background())
+		}
+	}()
+	var logWriter io.Writer = os.Stderr
+	var logCloser io.Closer
+	var logDegraded error
+	if cfg.Observability.LogFile != "" {
+		fileWriter, writerErr := observability.NewRotatingFileWriter(cfg.Observability.LogFile, cfg.Observability.RotateMaxBytes, cfg.Observability.RotateDaily, cfg.Observability.RetentionFiles)
+		if writerErr != nil {
+			logDegraded = writerErr
+		} else {
+			logWriter, logCloser = fileWriter, fileWriter
+		}
+	}
+	defer func() {
+		if cleanup && logCloser != nil {
+			_ = logCloser.Close()
+		}
+	}()
+	logger := observability.NewLogger(cfg.Observability.LogLevel, logWriter)
+	observation.SetLogger(logger)
+	if logDegraded != nil {
+		observation.SignalDegraded(context.Background(), "log_file")
+		observability.Log(context.Background(), logger, slog.LevelWarn, "observability.degraded", slog.String("signal", "log_file"), slog.String("error_class", "unavailable"))
+	}
+	var mysqlAdapter *mysqlinfra.Adapter
+	if mysqlConfig := catalog.MySQL(); mysqlConfig.Enabled {
+		dsn := os.Getenv(mysqlConfig.DSNEnv)
+		if dsn == "" {
+			return nil, fmt.Errorf("MySQL DSN 环境变量 %q 未设置", mysqlConfig.DSNEnv)
+		}
+		mysqlAdapter, err = mysqlinfra.Open(context.Background(), dsn, nil)
+		if err != nil {
+			return nil, err
+		}
+		if mysqlConfig.AutoMigrate {
+			if err := mysqlAdapter.AutoMigrate(context.Background()); err != nil {
+				_ = mysqlAdapter.Close()
+				return nil, fmt.Errorf("MySQL 迁移失败: %w", err)
+			}
+		}
+		if mysqlConfig.Seed {
+			if err := mysqlAdapter.Seed(context.Background()); err != nil {
+				_ = mysqlAdapter.Close()
+				return nil, fmt.Errorf("MySQL 种子失败: %w", err)
+			}
+		}
+	}
+	defer func() {
+		if cleanup && mysqlAdapter != nil {
+			_ = mysqlAdapter.Close()
 		}
 	}()
 	var repository application.Repository = persistence.NewMemoryRepository()
@@ -110,7 +199,7 @@ func New(cfg config.Config) (*App, error) {
 			return nil, fmt.Errorf("MCP 装配失败: %w", err)
 		}
 	}
-	tools, err := toolinfra.NewRegistryWithMCP(userQuery.Implementation, userQuery.Endpoint, userQuery.Timeout, mcpClient, userQuery.MCPServer)
+	tools, err := toolinfra.NewRegistryWithMCP(userQuery.Implementation, userQuery.Endpoint, userQuery.Timeout, mcpClient, userQuery.MCPServer, mysqlAdapter)
 	if err != nil {
 		return nil, fmt.Errorf("Tool 装配失败: %w", err)
 	}
@@ -139,8 +228,32 @@ func New(cfg config.Config) (*App, error) {
 	if budget.Timeout <= 0 {
 		budget.Timeout = 5 * time.Second
 	}
-	policy := agent.NewPolicyGate(workers, toolinfra.ContractsFor(userQuery.Implementation))
+	contracts := toolinfra.ContractsFor(userQuery.Implementation)
+	if mysqlAdapter != nil {
+		contracts = toolinfra.ContractsForMySQL(userQuery.Implementation)
+	}
+	policy := agent.NewPolicyGate(workers, contracts)
 	authenticator := authinfra.NewStaticBearerAuthenticator(cfg.Auth.Credentials)
+	var modelProvider ModelProvider
+	if realSupervisor, ok := supervisor.(*llm.RealSupervisor); ok {
+		modelProvider = realSupervisor
+	}
+	runnerFactory := NewRunnerFactory(modelProvider, tools, tools, contracts, einoinfra.NewMemoryCheckpointStore())
+	runners := make(map[string]application.WorkerRunner)
+	for workerID, worker := range catalog.Workers() {
+		if !worker.Enabled {
+			continue
+		}
+		workerRunner, buildErr := runnerFactory.Build(context.Background(), worker)
+		if buildErr != nil {
+			return nil, fmt.Errorf("Worker %q Runner 装配失败: %w", workerID, buildErr)
+		}
+		runners[workerID] = workerRunner
+	}
+	runner, err := NewWorkerRunnerDispatcher(runners)
+	if err != nil {
+		return nil, err
+	}
 	deps := application.Dependencies{
 		Repository:    repository,
 		Checkpoint:    checkpoints,
@@ -148,14 +261,38 @@ func New(cfg config.Config) (*App, error) {
 		Supervisor:    supervisor,
 		Policy:        policy,
 		RunAuth:       authinfra.OwnerRunAuthorizer{},
-		Runner:        application.SingleToolRunner{Tools: tools},
+		Runner:        runner,
 		Tools:         tools,
 		ToolValidator: tools,
 		MemoryStore:   memoryStore,
 		MemoryRead:    memoryStore,
+		Observer:      observation,
 		Budget:        budget,
 	}
-	app := &App{Config: cfg, Authenticator: authenticator, Run: runapp.NewService(deps), Memory: memoryStore, Health: application.HealthService{Dependencies: deps}, Close: observation.Shutdown}
+	snapshot := RuntimeSnapshot{WorkerTools: make(map[string][]string)}
+	for toolID, tool := range catalog.Tools() {
+		if tool.Enabled {
+			snapshot.ToolIDs = append(snapshot.ToolIDs, toolID)
+		}
+	}
+	sort.Strings(snapshot.ToolIDs)
+	for workerID, worker := range catalog.Workers() {
+		if worker.Enabled {
+			snapshot.WorkerTools[workerID] = append([]string(nil), worker.AllowedTools...)
+			sort.Strings(snapshot.WorkerTools[workerID])
+		}
+	}
+	app := &App{Config: cfg, Logger: logger, Authenticator: authenticator, Run: runapp.NewService(deps), Memory: memoryStore, Health: application.HealthService{Dependencies: deps}, snapshot: snapshot, fakeWriteCount: tools.OutreachCount}
+	app.Close = func(shutdownCtx context.Context) error {
+		shutdownErr := observation.Shutdown(shutdownCtx)
+		if mysqlAdapter != nil {
+			shutdownErr = errors.Join(shutdownErr, mysqlAdapter.Close())
+		}
+		if logCloser != nil {
+			shutdownErr = errors.Join(shutdownErr, logCloser.Close())
+		}
+		return shutdownErr
+	}
 	if !app.Health.Healthy() {
 		return nil, errors.New("应用依赖装配不完整")
 	}
@@ -186,7 +323,8 @@ func validateExampleBusiness(catalog config.RuntimeCatalog) error {
 			continue
 		}
 		registered, ok := examplebusiness.WorkerFor(workerID)
-		if !ok || worker.Implementation != registered.Implementation || worker.Runner != registered.Runner || worker.PromptFile != registered.PromptFile {
+		runnerOK := worker.Runner == registered.Runner || worker.Runner == "eino_adk"
+		if !ok || worker.Implementation != registered.Implementation || !runnerOK || worker.PromptFile != registered.PromptFile {
 			return fmt.Errorf("Worker %q 未在示例业务模块注册", workerID)
 		}
 	}

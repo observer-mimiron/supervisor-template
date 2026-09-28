@@ -127,6 +127,23 @@ type EventStore interface {
 	Events(string) []agent.RunEvent
 }
 
+// ContextEventStore 是可选的 context-aware 事件扩展；旧事件存储仍可实现基础合同。
+type ContextEventStore interface {
+	AppendContext(context.Context, agent.RunEvent) (agent.RunEvent, error)
+	EventsContext(context.Context, string) []agent.RunEvent
+}
+
+// ContextCheckpointStore 是可选的 context-aware checkpoint 扩展。
+type ContextCheckpointStore interface {
+	SaveContext(context.Context, agent.Checkpoint) (agent.Checkpoint, error)
+	GetContext(context.Context, string) (agent.Checkpoint, bool)
+}
+
+// ContextCheckpointReader 是可选的 context-aware checkpoint 读取扩展。
+type ContextCheckpointReader interface {
+	GetWithContext(context.Context, string) (agent.Checkpoint, bool, error)
+}
+
 // Authenticator 将传输层提取的凭证解析为可信主体。
 type Authenticator interface {
 	Authenticate(context.Context, string) (identity.Subject, error)
@@ -146,6 +163,24 @@ type DecisionProvider interface {
 // PolicyEvaluator 是确定性策略门控的应用层最小接口。
 type PolicyEvaluator interface {
 	Evaluate(agent.SupervisorDecision) (agent.ApprovedRoute, error)
+}
+
+// RuntimeObserver is the narrow application-to-infrastructure observation port.
+// Implementations must keep attributes low-cardinality and must not receive user payloads.
+type RuntimeObserver interface {
+	Observe(context.Context, RuntimeObservation)
+}
+
+type RuntimeObservation struct {
+	RunID         string
+	WorkerID      string
+	ToolID        string
+	Phase         string
+	ErrorCode     string
+	ErrorClass    string
+	RetryDecision string
+	Attempt       int
+	Duration      time.Duration
 }
 
 // ToolExecutor 是 Worker 调用已批准 Tool 的应用层最小接口。
@@ -179,6 +214,15 @@ type ToolPoolLease interface {
 // ToolInvoker owns bounded Tool resources, not policy, approval, or run state.
 type ToolInvoker interface {
 	Acquire(context.Context, ToolInvocation) (ToolPoolLease, error)
+}
+
+// RunnerSession contains checkpoint identity and bounded budgets for one run.
+type RunnerSession struct {
+	RunID       string
+	Checkpoint  string
+	Deadline    time.Time
+	ToolBudget  int
+	ModelBudget int
 }
 
 // WorkerRequest 是已通过 Policy Gate 的单个 Worker 执行请求。
@@ -252,6 +296,7 @@ type Dependencies struct {
 	ToolValidator ToolContractValidator
 	MemoryStore   appmemory.Store
 	MemoryRead    appmemory.Retriever
+	Observer      RuntimeObserver
 	// Tools 保留给旧装配和合同测试；新运行链路优先使用 Runner。
 	Tools ToolExecutor
 }

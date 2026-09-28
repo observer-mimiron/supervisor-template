@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -344,6 +345,26 @@ func TestPreCallFailureStopsAtCallAndCostBudget(t *testing.T) {
 	}
 }
 
+func TestApplicationPersistsAndPassesRunnerCheckpointToken(t *testing.T) {
+	steps := []agent.PlanStep{
+		{StepID: "step-1", WorkerID: "user_analysis", Intent: "query", ToolID: "user_query", Input: map[string]string{"message": "one"}, Status: agent.StepPending, IdempotencyKey: "run-token:step-1"},
+		{StepID: "step-2", WorkerID: "user_analysis", Intent: "query", ToolID: "user_query", Input: map[string]string{"message": "two"}, Status: agent.StepPending, IdempotencyKey: "run-token:step-2"},
+	}
+	service, _ := prepareExecutionPlan(t, "run-token", steps, application.ExecutionBudget{MaxPlanSteps: 2, MaxToolCalls: 2, CostBudget: 2, Timeout: time.Second})
+	runner := &tokenRunner{}
+	service.deps.Runner = runner
+	if _, err := service.Resume(context.Background(), testSubject(), "run-token"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.requests) != 2 || runner.requests[0].ResumeToken != "" || runner.requests[1].ResumeToken != "eino-token-1" {
+		t.Fatalf("runner tokens = %#v", runner.requests)
+	}
+	checkpoint, ok := service.deps.Checkpoint.Get("run-token")
+	if !ok || checkpoint.RunnerToken != "eino-token-2" {
+		t.Fatalf("checkpoint token = %#v, found=%v", checkpoint, ok)
+	}
+}
+
 func TestResumeRepairsMissingTerminalEventOnce(t *testing.T) {
 	service, _ := newTestService()
 	store := &repairingEventStore{}
@@ -366,6 +387,75 @@ func TestResumeRepairsMissingTerminalEventOnce(t *testing.T) {
 	}
 }
 
+func TestResumeRepairsMissingStepProjections(t *testing.T) {
+	service, _ := newTestService()
+	store := &repairingEventStore{dropSucceededProgress: true, dropText: true}
+	service.deps.EventBus = store
+	runID, err := service.Start(context.Background(), request("run-repair-step", "分析示例用户分群"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasEvent(store.Events(runID), agent.Text) {
+		t.Fatal("test store unexpectedly retained text projection")
+	}
+	if _, err := service.Resume(context.Background(), testSubject(), runID); err != nil {
+		t.Fatal(err)
+	}
+	var succeededProgress, text int
+	for _, event := range store.Events(runID) {
+		if event.Type == agent.Progress && event.Data["status"] == "succeeded" {
+			succeededProgress++
+		}
+		if event.Type == agent.Text {
+			text++
+		}
+	}
+	if succeededProgress != 1 || text != 1 || terminalCount(store.Events(runID)) != 1 {
+		t.Fatalf("missing step projections were not repaired exactly once: %#v", store.Events(runID))
+	}
+}
+
+func TestResultPersistenceFailureWaitsForReconciliation(t *testing.T) {
+	service, plan := prepareExecutionPlan(t, "run-result-commit-failure", []agent.PlanStep{
+		{StepID: "step-1", WorkerID: "user_analysis", Intent: "query", ToolID: "user_query", Input: map[string]string{"message": "query"}, Status: agent.StepPending, IdempotencyKey: "run-result-commit-failure:step-1"},
+	}, application.ExecutionBudget{MaxPlanSteps: 1, MaxToolCalls: 1, CostBudget: 1, Timeout: time.Second})
+	runner := &recordingRunner{result: "result"}
+	service.deps.Runner = runner
+	service.deps.Repository = &failNextPlanSave{Repository: service.deps.Repository, failNext: true}
+	service.mu.Lock()
+	err := service.executeLocked(context.Background(), plan)
+	service.mu.Unlock()
+	var runErr *Error
+	if !errors.As(err, &runErr) || runErr.Code != agent.ErrorOutcomeUnknown {
+		t.Fatalf("expected unknown outcome after result persistence failure, got %v", err)
+	}
+	stored, ok := service.deps.Repository.GetPlan(plan.RunID)
+	if !ok || stored.Status != agent.RunWaitingReconciliation || len(runner.requests) != 1 {
+		t.Fatalf("failed result commit was not held for reconciliation: plan=%#v calls=%d", stored, len(runner.requests))
+	}
+	if _, err := service.Resume(context.Background(), testSubject(), plan.RunID); !errors.As(err, &runErr) || runErr.Code != agent.ErrorOutcomeUnknown {
+		t.Fatalf("resume should remain reconciliation-gated: %v", err)
+	}
+	if len(runner.requests) != 1 || terminalCount(service.Events(plan.RunID)) != 0 {
+		t.Fatalf("unknown result was retried or finalized: calls=%d events=%#v", len(runner.requests), service.Events(plan.RunID))
+	}
+}
+
+func TestCheckpointFailurePreventsRunnerInvocation(t *testing.T) {
+	service, plan := prepareExecutionPlan(t, "run-checkpoint-failure", []agent.PlanStep{
+		{StepID: "step-1", WorkerID: "user_analysis", Intent: "query", ToolID: "user_query", Input: map[string]string{"message": "query"}, Status: agent.StepPending, IdempotencyKey: "run-checkpoint-failure:step-1"},
+	}, application.ExecutionBudget{MaxPlanSteps: 1, MaxToolCalls: 1, CostBudget: 1, Timeout: time.Second})
+	runner := &recordingRunner{result: "result"}
+	service.deps.Runner = runner
+	service.deps.Checkpoint = &failNextCheckpointSave{CheckpointStore: service.deps.Checkpoint}
+	service.mu.Lock()
+	err := service.executeLocked(context.Background(), plan)
+	service.mu.Unlock()
+	if err == nil || len(runner.requests) != 0 || hasEvent(service.Events(plan.RunID), agent.ToolCall) {
+		t.Fatalf("runner entered before checkpoint persisted: err=%v calls=%d events=%#v", err, len(runner.requests), service.Events(plan.RunID))
+	}
+}
+
 func TestApprovalBlocksSideEffectAndRepeatedResumeIsIdempotent(t *testing.T) {
 	service, tools := newTestService()
 	runID, err := service.Start(context.Background(), request("run-side-effect", "模拟触达示例用户"))
@@ -374,6 +464,10 @@ func TestApprovalBlocksSideEffectAndRepeatedResumeIsIdempotent(t *testing.T) {
 	}
 	if tools.OutreachCount() != 0 || !hasEvent(service.Events(runID), agent.ApprovalRequired) {
 		t.Fatalf("side effect escaped approval: %#v", service.Events(runID))
+	}
+	plan, ok := service.deps.Repository.GetPlan(runID)
+	if !ok || plan.Steps[0].Input["message"] == "" || plan.Steps[0].Input["tool_id"] != "" {
+		t.Fatalf("route metadata leaked into Tool input: %#v", plan)
 	}
 	if _, err := service.Resume(context.Background(), testSubject(), runID); err == nil {
 		t.Fatal("expected approval requirement")
@@ -388,6 +482,27 @@ func TestApprovalBlocksSideEffectAndRepeatedResumeIsIdempotent(t *testing.T) {
 	}
 	if tools.OutreachCount() != 1 || terminalCount(service.Events(runID)) != 1 {
 		t.Fatalf("idempotency failed: count=%d events=%#v", tools.OutreachCount(), service.Events(runID))
+	}
+}
+
+func TestApprovalWaitDoesNotConsumeExecutionDeadline(t *testing.T) {
+	service, tools := newTestService()
+	clock := time.Now()
+	service.now = func() time.Time { return clock }
+	service.deps.Budget = application.ExecutionBudget{MaxPlanSteps: 1, MaxToolCalls: 1, CostBudget: 1, Timeout: time.Second}
+	runID, err := service.Start(context.Background(), request("run-approval-deadline", "模拟触达示例用户"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(2 * time.Second)
+	if err := service.Approve(context.Background(), testSubject(), runID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Resume(context.Background(), testSubject(), runID); err != nil {
+		t.Fatal(err)
+	}
+	if tools.OutreachCount() != 1 || !hasEvent(service.Events(runID), agent.Completed) {
+		t.Fatalf("approval wait consumed execution deadline: writes=%d events=%#v", tools.OutreachCount(), service.Events(runID))
 	}
 }
 
@@ -453,6 +568,9 @@ func TestCancelApprovalRunProducesCanceledTerminal(t *testing.T) {
 	if tools.OutreachCount() != 0 || terminalCount(events) != 1 || events[len(events)-1].Type != agent.Canceled {
 		t.Fatalf("cancel did not terminate safely: %#v", events)
 	}
+	if got := events[len(events)-1].Data["step_id"]; got != runID+":step-1" {
+		t.Fatalf("canceled step_id=%q, want %q", got, runID+":step-1")
+	}
 	if err := service.Cancel(context.Background(), testSubject(), runID); err != nil {
 		t.Fatal(err)
 	}
@@ -474,6 +592,9 @@ func TestToolTimeoutIsClassifiedAndDoesNotComplete(t *testing.T) {
 	events := service.Events(runID)
 	if events[len(events)-1].Type != agent.Failed || hasEvent(events, agent.Completed) {
 		t.Fatalf("timeout terminal is invalid: %#v", events)
+	}
+	if got := events[len(events)-1].Data["step_id"]; got != runID+":step-1" {
+		t.Fatalf("failed step_id=%q, want %q", got, runID+":step-1")
 	}
 }
 
@@ -543,6 +664,13 @@ type recordingRunner struct {
 
 type sequenceRunner struct{ requests []application.WorkerRequest }
 
+type tokenRunner struct{ requests []application.WorkerRequest }
+
+func (r *tokenRunner) Run(_ context.Context, request application.WorkerRequest) (application.WorkerResult, error) {
+	r.requests = append(r.requests, request)
+	return application.WorkerResult{Content: "ok", Checkpoint: fmt.Sprintf("eino-token-%d", len(r.requests))}, nil
+}
+
 func (r *sequenceRunner) Run(_ context.Context, request application.WorkerRequest) (application.WorkerResult, error) {
 	r.requests = append(r.requests, request)
 	return application.WorkerResult{Content: request.Input["message"] + " result"}, nil
@@ -592,8 +720,10 @@ func (r *unknownOutcomeRunner) Run(context.Context, application.WorkerRequest) (
 }
 
 type repairingEventStore struct {
-	events          map[string][]agent.RunEvent
-	droppedTerminal bool
+	events                map[string][]agent.RunEvent
+	droppedTerminal       bool
+	dropSucceededProgress bool
+	dropText              bool
 }
 
 func (s *repairingEventStore) Append(event agent.RunEvent) (agent.RunEvent, error) {
@@ -604,10 +734,37 @@ func (s *repairingEventStore) Append(event agent.RunEvent) (agent.RunEvent, erro
 		s.droppedTerminal = true
 		return event, nil
 	}
+	if event.Type == agent.Progress && event.Data["status"] == "succeeded" && s.dropSucceededProgress {
+		s.dropSucceededProgress = false
+		return event, nil
+	}
+	if event.Type == agent.Text && s.dropText {
+		s.dropText = false
+		return event, nil
+	}
 	items := s.events[event.RunID]
 	event.Sequence = int64(len(items) + 1)
 	s.events[event.RunID] = append(items, event)
 	return event, nil
+}
+
+type failNextPlanSave struct {
+	application.Repository
+	failNext bool
+}
+
+func (r *failNextPlanSave) SavePlan(plan agent.ExecutionPlan) error {
+	if r.failNext && len(plan.Steps) > 0 && plan.Steps[0].Status == agent.StepSucceeded {
+		r.failNext = false
+		return errors.New("injected plan persistence failure")
+	}
+	return r.Repository.SavePlan(plan)
+}
+
+type failNextCheckpointSave struct{ application.CheckpointStore }
+
+func (s *failNextCheckpointSave) Save(agent.Checkpoint) (agent.Checkpoint, error) {
+	return agent.Checkpoint{}, errors.New("injected checkpoint persistence failure")
 }
 
 func (s *repairingEventStore) Events(runID string) []agent.RunEvent {
@@ -660,4 +817,70 @@ func hasEvent(events []agent.RunEvent, want agent.EventType) bool {
 		}
 	}
 	return false
+}
+
+func TestTwoStepResumeSkipsCompletedFixtureStep(t *testing.T) {
+	steps := []agent.PlanStep{
+		{StepID: "step-1", WorkerID: "user_analysis", Intent: "user_analysis", ToolID: "user_query", Input: map[string]string{"tool_id": "user_query", "message": `{"as_of":"2026-09-25"}`}, Status: agent.StepPending, IdempotencyKey: "run-recovery:step-1"},
+		{StepID: "step-2", WorkerID: "user_summary", Intent: "summarize_user_analysis", ToolID: "user_summary_query", Input: map[string]string{"tool_id": "user_summary_query", "message": "pending"}, Status: agent.StepPending, IdempotencyKey: "run-recovery:step-2"},
+	}
+	service, plan := prepareExecutionPlan(t, "run-recovery", steps, application.ExecutionBudget{MaxPlanSteps: 2, MaxToolCalls: 2, CostBudget: 2, Timeout: time.Second})
+	runner := &fixtureCountingRunner{}
+	service.deps.Runner = runner
+	service.deps.Repository = &interruptAfterFirstStepSave{Repository: service.deps.Repository}
+	service.mu.Lock()
+	firstErr := service.executeLocked(context.Background(), plan)
+	service.mu.Unlock()
+	if firstErr == nil || runner.calls["user_query"] != 1 || runner.calls["user_summary_query"] != 0 {
+		t.Fatalf("interruption did not stop after first step: err=%v calls=%#v", firstErr, runner.calls)
+	}
+	events, err := service.Resume(context.Background(), testSubject(), "run-recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.calls["user_query"] != 1 || runner.calls["user_summary_query"] != 1 {
+		t.Fatalf("resume replayed or skipped steps: calls=%#v", runner.calls)
+	}
+	for index, event := range events {
+		if event.Sequence != int64(index+1) {
+			t.Fatalf("event sequence = %d at index %d: %#v", event.Sequence, index, events)
+		}
+	}
+	if terminalCount(events) != 1 || events[len(events)-1].Type != agent.Completed {
+		t.Fatalf("recovery terminal events = %#v", events)
+	}
+}
+
+type fixtureCountingRunner struct {
+	calls map[string]int
+}
+
+func (r *fixtureCountingRunner) Run(ctx context.Context, request application.WorkerRequest) (application.WorkerResult, error) {
+	if err := ctx.Err(); err != nil {
+		return application.WorkerResult{}, err
+	}
+	if r.calls == nil {
+		r.calls = make(map[string]int)
+	}
+	r.calls[request.ToolID]++
+	if request.ToolID == "user_query" {
+		return application.WorkerResult{Content: `{"count":4,"customer_ids":["cust-001","cust-002","cust-006","cust-008"],"spend_365d_total":6200}`, Checkpoint: "fixture-step-1"}, nil
+	}
+	return application.WorkerResult{Content: `{"count":4,"spend_365d_total":6200,"segments":["dormant","consented"]}`, Checkpoint: "fixture-step-2"}, nil
+}
+
+type interruptAfterFirstStepSave struct {
+	application.Repository
+	interrupted bool
+}
+
+func (r *interruptAfterFirstStepSave) SavePlan(plan agent.ExecutionPlan) error {
+	if !r.interrupted && len(plan.Steps) == 2 && plan.Steps[0].Status == agent.StepSucceeded && plan.Steps[1].Status == agent.StepPending && strings.HasPrefix(plan.Steps[1].Input["message"], `{"count"`) {
+		r.interrupted = true
+		if err := r.Repository.SavePlan(plan); err != nil {
+			return err
+		}
+		return errors.New("injected interruption after first fixture step")
+	}
+	return r.Repository.SavePlan(plan)
 }

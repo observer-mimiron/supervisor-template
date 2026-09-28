@@ -37,6 +37,39 @@
 
 任何反向依赖都必须先改变设计文档并通过宪法要求的变更流程。`composition` 只装配实现、注册能力和注入依赖，不承载业务判断；基础设施实现只能通过领域或应用合同接入。能力只在启动期显式注册，配置只能引用已注册 ID；重复 ID、缺失引用、allow-list 越权和降低审批要求的配置必须在启动时失败。禁止反射扫描、`init()` 自注册、热加载和通用 `Component` 接口。
 
+## 架构防腐与失败半径
+
+### 静态结构约束
+
+- 包依赖由 `cmd/archcheck` 检查，并在 `.github/workflows/ci.yml` 中作为 CI 步骤执行；目标是保持 `interfaces -> application -> domain`，基础设施只通过领域/应用合同向内接入。
+- `RuntimeCatalog` 在启动时冻结 Worker、Route、Prompt、Runner、Tool 和预算引用。配置只能选择已注册实现，不能创造能力、扩大权限或降低审批等级。
+- Domain 合同不导入 HTTP、Eino、数据库、MCP、具体模型或 SSE。Trace、日志和 SQL 只能提供证据，不能成为业务状态 owner。
+
+### 运行时确定性约束
+
+| 关注点 | 确定性规则 | 证据 |
+| --- | --- | --- |
+| 权限和路由 | Supervisor 输出先过结构解析、注册表、Worker allow-list 和 Policy Gate | `internal/domain/agent`、composition/run 合同测试 |
+| 副作用 | `Approval -> Idempotency -> Tool -> Audit Event`，批准前不执行 | `boundary-approved-outreach`、`negative-reject-outreach` |
+| 状态 owner | Application/Manager 推进 `ExecutionPlan` 和终态，Worker 只能返回受控结果 | `internal/application/run/service.go`、唯一终态测试 |
+| 未知结果 | 外部调用开始但提交未确认时进入 `waiting_reconciliation`，Resume 不自动重试 | `OutcomeUnknownError`、`TestUnknownRunnerOutcomeWaitsForReconciliationAndNeverRetries` |
+| 失败半径 | 每个 run 有步骤、调用、重试、成本、deadline 和取消边界；Runner 不持有全局状态锁 | `ExecutionBudget`、Runner/取消合同测试 |
+| 观测故障 | exporter、日志或 snapshot 失败只产生 degraded signal，不改变业务状态 | `internal/infrastructure/observability` 合同测试 |
+
+### LLM、人工和观测的边界
+
+- LLM 只能提供候选路由、结构化参数和候选文本；它不能授权 Tool、改变状态、生成幂等键、决定审批或决定最终事件类型。
+- 人工确认用于高风险副作用审批、PR 高风险变更批准，以及评测失败后的 `HumanDisposition`。失败样本不会自动写回 Dataset。
+- LLM Judge（如果启用）只消费脱敏 diff、Case 和证据摘要，输出 advisory 结果；Policy Gate、Approval、Idempotency 和硬评测不由 Judge 替代。
+- OTLP/Langfuse 是可选诊断出口，本地 JSON 报告才是默认评测事实来源；观测后端不可用不能改变业务结果。
+
+### 真实失败案例：未知结果不重试
+
+1. **原行为：** Tool 调用已经开始，但结果在写回计划前发生中断，系统只能确认“可能已生效”，于是把 run 标记为 `RUN_OUTCOME_UNKNOWN`/`waiting_reconciliation`。
+2. **为什么普通功能测试可能通过：** 成功路径和失败返回都能通过；真正危险的窗口只出现在“外部调用已开始、结果提交未确认”之间，若没有故障注入，重复 Resume 很容易被误写成普通重试。
+3. **哪条合同捕获：** `internal/application/run/service_test.go` 的 `TestUnknownRunnerOutcomeWaitsForReconciliationAndNeverRetries` 与 `error_policy_test.go` 的 `unknown outcome` 断言要求 Resume 不再次调用 Runner。
+4. **修复后的长期约束：** `OutcomeUnknownError` 与可重试的 `PreCallError` 分离；只有调用尚未开始的失败可以消耗 retry budget，未知结果必须等待人工/外部 reconciliation。
+
 ## 目录职责与禁止事项
 
 | 目录 | 负责内容 | 明确禁止 |
@@ -57,7 +90,7 @@
 
 ## v1 实现边界
 
-v1 默认使用内存 Repository、内存 checkpoint、fake model 和 fake Tool，目标是验证合同、状态和事件顺序；M4 已补充可选的文件持久化实现，支持单实例写入和跨进程读取恢复快照，但不承诺数据库级高可用、多主并发或跨存储 exactly-once。执行结果在外部调用后、提交前发生进程中断时必须视为未知，恢复返回 `RUN_OUTCOME_UNKNOWN`，禁止自动重试。M3 已补充可选真实 ChatModel、固定地址 HTTP 只读 Tool 和 OpenTelemetry 适配，M4 还补充了受 allow-list、超时、大小限制和错误分类约束的 MCP Tool 适配；这些都不会改变默认本地合同路径。第一条可运行验收链路固定为：
+v1 的默认存储仍是内存 Repository/checkpoint，示例业务 Tool 使用 fake 实现；服务样例配置默认使用 DeepSeek，离线合同测试和 Case Runner 显式选择 fake Supervisor。M4 已补充可选的文件持久化实现，支持单实例写入和跨进程读取恢复快照，但不承诺数据库级高可用、多主并发或跨存储 exactly-once。执行结果在外部调用后、提交前发生进程中断时必须视为未知，恢复返回 `RUN_OUTCOME_UNKNOWN`，禁止自动重试。M3 已补充固定地址 HTTP 只读 Tool 和 OpenTelemetry 适配，M4 还补充了受 allow-list、超时、大小限制和错误分类约束的 MCP Tool 适配。第一条可运行验收链路固定为：
 
 `Gin -> Application -> Eino Supervisor -> fake Worker -> fake Tool -> RunEvent -> SSE`
 
@@ -65,7 +98,7 @@ v1 默认使用内存 Repository、内存 checkpoint、fake model 和 fake Tool�
 
 ## 身份与权限边界
 
-本项目只借鉴本地 Coze Studio 的边界，不复制其平台实现：认证中间件先建立可信 session/主体，资源授权再按操作者与资源校验。模板中对应为：
+本项目以 Coze Studio 作为主要架构参考，允许直接选择性移植或模仿其中的文件/小模块；认证中间件先建立可信 session/主体，资源授权再按操作者与资源校验。移植代码必须接回本项目合同并通过本地测试，不得整套搬入平台子系统或绕过本项目边界。模板中对应为：
 
 1. `Authenticator` 把 HTTP Bearer 凭证映射为 `identity.Subject{TenantID, SubjectID}`；主体不从请求 JSON 读取。
 2. `RunAuthorizer` 只判断主体是否拥有目标 run；未知主体、跨租户或跨用户的 run 操作不能改变状态。
@@ -76,13 +109,13 @@ v1 默认使用内存 Repository、内存 checkpoint、fake model 和 fake Tool�
 
 ## 脚手架扩展约束
 
-本项目定位为 Agent 开发脚手架，不定位为 Coze 类工作流平台。稳定内核包括 HTTP/SSE、应用运行状态、ExecutionPlan、Policy Gate、审批、幂等、Final Guard、checkpoint 和事件投影；业务实现、路由组装和执行策略属于可替换扩展。
+本项目定位为可借鉴并部分复用 Coze 思路的 Agent 开发脚手架，不直接重建完整 Coze 类工作流平台。稳定内核包括 HTTP/SSE、应用运行状态、ExecutionPlan、Policy Gate、审批、幂等、Final Guard、checkpoint 和事件投影；业务实现、路由组装和执行策略属于可替换扩展。
 
 新增业务 SHOULD 集中在独立业务模块，通过 Catalog/注册表和配置接入。路由、Worker/Expert、Prompt、Tool 绑定、Runner 选择和预算优先由配置描述；配置只能选择已注册实现，不能创造能力、扩大权限或改变状态所有权。
 
 应用层应依赖稳定的 WorkerRunner 合同。普通函数 Worker、Eino ReAct、Graph 或其他执行器应作为基础设施适配器接入；更换执行器不应修改 HTTP、Policy Gate、状态机、通用运行循环和 SSE 投影。Runner/Tool 必须遵守 `context.Context`，取消是协作式语义，不对外承诺强制终止任意外部进程。
 
-组件化增量的具体阶段、注册合同、故障边界和开源源码依据见 [脚手架演进先行方案](./scaffold-evolution-plan.md)
+组件化增量的历史背景、注册合同和故障边界见 [脚手架演进先行方案](./scaffold-evolution-plan.md)；当前待执行工作只以 [Implementation Plan](../specs/001-eino-supervisor-template/plan.md)、其 `tasks.md` 和 `PROGRESS.md` 为准。
 和 [组件参考矩阵](./component-reference-map.md)。`ExecutionPlan` 是业务状态唯一 owner，checkpoint 只做恢复投影，RunEvent 只做事件投影；三者之间没有隐式万能事件总线或跨存储事务假设。
 
-当前实现已通过 `WorkerRunner` 作为应用层执行边界：默认 `SingleToolRunner` 仍只执行一次已批准 Tool，后续可替换为其他 Runner 而不改变运行状态机和 SSE 投影。启动阶段会编译不可变 `RuntimeCatalog`，校验路由、Worker、Prompt、Runner、Tool allow-list 和预算引用；运行期不再读取可变配置 map。示例业务注册集中在 `internal/infrastructure/examplebusiness`，真实运营业务、完整身份平台和 ReAct/Graph DSL 仍属于延期范围。
+当前实现已通过 `WorkerRunner` 作为应用层执行边界：启动阶段由 `RunnerFactory` 按 `RuntimeCatalog` 为每个 Worker 构建 Runner，再由 `WorkerRunnerDispatcher` 按 WorkerID 分派；默认 `SingleToolRunner` 仍只执行一次已批准 Tool，`eino_adk` 则由 `AgentFactory` 按已批准步骤构建 ADK Agent。更换执行器不改变运行状态机和 SSE 投影。启动阶段会校验路由、Worker、Prompt、Runner、Tool allow-list 和预算引用；运行期不再读取可变配置 map。真实运营业务、完整身份平台和 ReAct/Graph DSL 仍属于延期范围。

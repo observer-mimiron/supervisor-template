@@ -5,6 +5,7 @@
 package eventbus
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,20 @@ import (
 
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
+
+func (b *FileBus) AppendContext(ctx context.Context, event agent.RunEvent) (agent.RunEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.RunEvent{}, err
+	}
+	return b.Append(event)
+}
+
+func (b *FileBus) EventsContext(ctx context.Context, runID string) []agent.RunEvent {
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
+	return b.Events(runID)
+}
 
 const fileSchemaVersion = 1
 

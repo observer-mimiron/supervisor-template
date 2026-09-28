@@ -27,6 +27,7 @@ type Config struct {
 	Checkpoint    CheckpointConfig      `toml:"checkpoint"`
 	Storage       StorageConfig         `toml:"storage"`
 	MCP           MCPConfig             `toml:"mcp"`
+	MySQL         MySQLConfig           `toml:"mysql"`
 	Observability ObservabilityConfig   `toml:"observability"`
 }
 
@@ -159,15 +160,34 @@ type MCPServerConfig struct {
 	AllowedTools []string `toml:"allowed_tools"`
 }
 
+// MySQLConfig selects the optional local MySQL example adapter. The DSN is
+// always read from the named environment variable and is never stored in TOML.
+type MySQLConfig struct {
+	Enabled     bool   `toml:"enabled"`
+	DSNEnv      string `toml:"dsn_env"`
+	AutoMigrate bool   `toml:"auto_migrate"`
+	Seed        bool   `toml:"seed"`
+}
+
 // ObservabilityConfig 定义可选的 OpenTelemetry 导出参数；认证头只从标准环境变量读取。
 type ObservabilityConfig struct {
-	Enabled         bool    `toml:"enabled"`
-	Endpoint        string  `toml:"endpoint"`
-	ServiceName     string  `toml:"service_name"`
-	Insecure        bool    `toml:"insecure"`
-	LogLevel        string  `toml:"log_level"`
-	TraceSampleRate float64 `toml:"trace_sample_rate"`
-	MetricsEnabled  bool    `toml:"metrics_enabled"`
+	Enabled            bool              `toml:"enabled"`
+	Endpoint           string            `toml:"endpoint"`
+	ServiceName        string            `toml:"service_name"`
+	Insecure           bool              `toml:"insecure"`
+	LogLevel           string            `toml:"log_level"`
+	TraceSampleRate    float64           `toml:"trace_sample_rate"`
+	MetricsEnabled     bool              `toml:"metrics_enabled"`
+	LogFile            string            `toml:"log_file"`
+	TraceFile          string            `toml:"trace_file"`
+	FileMode           string            `toml:"file_mode"`
+	RotateMaxBytes     int64             `toml:"rotate_max_bytes"`
+	RotateDaily        bool              `toml:"rotate_daily"`
+	RetentionFiles     int               `toml:"retention_files"`
+	ResourceAttributes map[string]string `toml:"resource_attributes"`
+	LangfuseEnabled    bool              `toml:"langfuse_enabled"`
+	LangfuseEndpoint   string            `toml:"langfuse_endpoint"`
+	LangfuseHeadersEnv string            `toml:"langfuse_headers_env"`
 }
 
 // Load 从 TOML 文件加载配置，再应用环境变量覆盖并执行启动校验。
@@ -176,8 +196,12 @@ func Load(path string) (Config, error) {
 	if path == "" {
 		return cfg, errors.New("配置文件路径不能为空")
 	}
-	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+	metadata, err := toml.DecodeFile(path, &cfg)
+	if err != nil {
 		return cfg, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+	if unknown := metadata.Undecoded(); len(unknown) > 0 {
+		return cfg, fmt.Errorf("配置包含未识别字段: %s", formatUndecodedKeys(unknown))
 	}
 	if err := cfg.applyEnvironment(); err != nil {
 		return cfg, err
@@ -186,6 +210,14 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	return cfg, cfg.Validate()
+}
+
+func formatUndecodedKeys(keys []toml.Key) string {
+	values := make([]string, 0, len(keys))
+	for _, key := range keys {
+		values = append(values, key.String())
+	}
+	return strings.Join(values, ", ")
 }
 
 // Validate 确保配置只能选择已注册实现，且预算和时间边界有效。
@@ -260,10 +292,10 @@ func (c Config) Validate() error {
 		}
 	}
 	for workerID, worker := range c.Agent.Workers {
-		if worker.Enabled && worker.Implementation != "fake.user_analysis" {
+		if worker.Enabled && !((workerID == "user_analysis" && worker.Implementation == "fake.user_analysis") || (workerID == "user_summary" && worker.Implementation == "fake.user_summary") || (workerID == "mysql_order" && worker.Implementation == "gorm.mysql_order")) {
 			return fmt.Errorf("Worker %q 实现未注册", workerID)
 		}
-		if worker.Enabled && worker.Runner != "" && worker.Runner != "single_tool" {
+		if worker.Enabled && worker.Runner != "" && worker.Runner != "single_tool" && worker.Runner != "eino_adk" {
 			return fmt.Errorf("Worker %q Runner %q 未注册", workerID, worker.Runner)
 		}
 		if worker.Enabled && worker.Timeout <= 0 {
@@ -308,8 +340,11 @@ func (c Config) Validate() error {
 		}
 	}
 	for toolID, tool := range c.Tools {
-		if tool.Enabled && tool.Implementation != "fake.user_query" && tool.Implementation != "fake.simulated_outreach" && tool.Implementation != "http.read_only" && tool.Implementation != "mcp.read_only" {
+		if tool.Enabled && tool.Implementation != "fake.user_query" && tool.Implementation != "fake.user_summary_query" && tool.Implementation != "fake.simulated_outreach" && tool.Implementation != "http.read_only" && tool.Implementation != "mcp.read_only" && tool.Implementation != "gorm.mysql_order_query" && tool.Implementation != "gorm.mysql_order_insert" {
 			return fmt.Errorf("Tool %q 实现未注册", toolID)
+		}
+		if tool.Enabled && (tool.Implementation == "gorm.mysql_order_query" || tool.Implementation == "gorm.mysql_order_insert") && !c.MySQL.Enabled {
+			return fmt.Errorf("Tool %q 使用 MySQL 但 mysql.enabled 未开启", toolID)
 		}
 		if tool.Enabled && tool.Implementation == "http.read_only" {
 			parsed, err := url.Parse(strings.TrimSpace(tool.Endpoint))
@@ -339,13 +374,67 @@ func (c Config) Validate() error {
 	if c.Approval.Timeout <= 0 || c.Approval.IdempotencyWindow <= 0 || c.Checkpoint.Retention <= 0 {
 		return errors.New("approval/checkpoint 时间配置不合法")
 	}
+	if c.MySQL.Enabled && !validEnvName(c.MySQL.DSNEnv) {
+		return errors.New("mysql.dsn_env 不是合法环境变量名")
+	}
 	if c.Observability.TraceSampleRate < 0 || c.Observability.TraceSampleRate > 1 {
 		return errors.New("observability.trace_sample_rate 必须在 0 到 1 之间")
 	}
-	if c.Observability.Enabled && c.Observability.ServiceName == "" {
+	if c.Observability.Enabled && strings.TrimSpace(c.Observability.ServiceName) == "" {
 		return errors.New("observability.service_name 不能为空")
 	}
+	if err := validateHTTPURL("observability.endpoint", c.Observability.Endpoint); err != nil {
+		return err
+	}
+	if c.Observability.LogLevel != "" {
+		switch strings.ToLower(strings.TrimSpace(c.Observability.LogLevel)) {
+		case "debug", "info", "warn", "warning", "error":
+		default:
+			return fmt.Errorf("observability.log_level %q 未注册", c.Observability.LogLevel)
+		}
+	}
+	if c.Observability.FileMode != "" && c.Observability.FileMode != "0600" {
+		return errors.New("observability.file_mode 只允许 0600")
+	}
+	if c.Observability.RotateMaxBytes < 0 || c.Observability.RetentionFiles < 0 {
+		return errors.New("observability 轮转和保留配置不能为负数")
+	}
+	if c.Observability.LangfuseEnabled {
+		if strings.TrimSpace(c.Observability.LangfuseEndpoint) == "" {
+			return errors.New("observability.langfuse_endpoint 不能为空")
+		}
+		if err := validateHTTPURL("observability.langfuse_endpoint", c.Observability.LangfuseEndpoint); err != nil {
+			return err
+		}
+		if !validEnvName(c.Observability.LangfuseHeadersEnv) {
+			return errors.New("observability.langfuse_headers_env 不是合法环境变量名")
+		}
+	}
 	return nil
+}
+
+func validateHTTPURL(name, raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("%s 必须是 http/https 地址", name)
+	}
+	return nil
+}
+
+func validEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, r := range name {
+		valid := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || (index > 0 && r >= '0' && r <= '9')
+		if !valid {
+			return false
+		}
+	}
+	return true
 }
 
 // applyEnvironment 只覆盖文档约定的部署字段，避免环境变量改变安全注册表。
@@ -376,11 +465,34 @@ func (c *Config) applyEnvironment() error {
 	if value := os.Getenv("PERSISTENCE_DIR"); value != "" {
 		c.Storage.Dir = value
 	}
+	if value := os.Getenv("MYSQL_DSN_ENV"); value != "" {
+		c.MySQL.DSNEnv = value
+	}
+	if value := os.Getenv("MYSQL_ENABLED"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("MYSQL_ENABLED 不是布尔值: %w", err)
+		}
+		c.MySQL.Enabled = enabled
+	}
 	if value := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); value != "" {
 		c.Observability.Endpoint = value
 	}
 	if value := os.Getenv("OTEL_SERVICE_NAME"); value != "" {
 		c.Observability.ServiceName = value
+	}
+	if value := os.Getenv("LANGFUSE_ENDPOINT"); value != "" {
+		c.Observability.LangfuseEndpoint = value
+	}
+	if value := os.Getenv("LANGFUSE_HEADERS_ENV"); value != "" {
+		c.Observability.LangfuseHeadersEnv = value
+	}
+	if value := os.Getenv("LANGFUSE_ENABLED"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("LANGFUSE_ENABLED 不是布尔值: %w", err)
+		}
+		c.Observability.LangfuseEnabled = enabled
 	}
 	if value := os.Getenv("OTEL_ENABLED"); value != "" {
 		enabled, err := strconv.ParseBool(value)

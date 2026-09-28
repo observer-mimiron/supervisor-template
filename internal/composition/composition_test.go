@@ -2,15 +2,21 @@ package composition
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/identity"
+	httpapi "github.com/observer-mimiron/supervisor-template/internal/interfaces/http"
 )
 
 func TestNewBuildsHealthyMemoryGraph(t *testing.T) {
@@ -125,6 +131,93 @@ func TestNewRoutesConfiguredHTTPReadOnlyToolThroughApplicationContracts(t *testi
 	}
 }
 
+func TestNewFakeOutreachKeepsAudienceProjectionThroughResume(t *testing.T) {
+	cfg, err := loadExampleConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close(context.Background())
+	subject := identity.Subject{TenantID: "test-tenant", SubjectID: "test-user"}
+	runID, err := app.Run.Start(context.Background(), conversation.ExecutionRequest{
+		RunID:          "run-composition-outreach",
+		ConversationID: "conversation-1",
+		Subject:        subject,
+		Message:        "模拟触达示例用户",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Run.Approve(context.Background(), subject, runID, "approve"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Run.Resume(context.Background(), subject, runID); err != nil {
+		t.Fatal(err)
+	}
+	events := app.Run.Events(runID)
+	if len(events) == 0 || events[len(events)-1].Type != agent.Completed {
+		t.Fatalf("fake outreach did not complete: %#v", events)
+	}
+}
+
+func TestHTTPFakeOutreachUsesConfiguredAuthAndCompletesAfterResume(t *testing.T) {
+	cfg, err := loadExampleConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("composition-http-token"))
+	for index := range cfg.Auth.Credentials {
+		if cfg.Auth.Credentials[index].SubjectID == "demo-user" {
+			_ = os.Setenv(cfg.Auth.Credentials[index].TokenSHA256Env, hex.EncodeToString(digest[:]))
+			defer os.Unsetenv(cfg.Auth.Credentials[index].TokenSHA256Env)
+		}
+	}
+	app, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close(context.Background())
+	server := httptest.NewServer(httpapi.NewRouter(app.Run, app.Health, app.Authenticator))
+	defer server.Close()
+	client := server.Client()
+	post := func(path, body string) string {
+		req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer composition-http-token")
+		req.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		data, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			t.Fatalf("%s status=%d body=%s", path, response.StatusCode, data)
+		}
+		return string(data)
+	}
+	post("/api/chat", `{"run_id":"http-composition-outreach","conversation_id":"http-composition-outreach","message":"模拟触达沉睡客户"}`)
+	post("/api/runs/http-composition-outreach/approval", `{"decision":"approve"}`)
+	body := post("/api/runs/http-composition-outreach/resume", `{}`)
+	if !strings.Contains(body, `"type":"completed"`) {
+		t.Fatalf("resume body=%s", body)
+	}
+}
+
 func loadExampleConfig() (config.Config, error) {
-	return config.Load(filepath.Join("..", "..", "config.example.toml"))
+	cfg, err := config.Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Model.Provider = "fake"
+	cfg.Model.Name = "fake-model"
+	return cfg, nil
 }

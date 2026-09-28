@@ -1,0 +1,13 @@
+.git/
+.codegraph/
+.specify/
+.agents/
+.env*
+var/
+tmp/
+*.log
+*.test
+*.out
+coverage/
+Dockerfile*
+.dockerignore
