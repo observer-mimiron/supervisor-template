@@ -8,13 +8,13 @@
 
 这是一个以权限边界、运行状态、可恢复合同和本地确定性评测为核心的 Go/Eino Agent 脚手架，不是一个成熟的 Agent 平台。它已经完成了“请求进入、候选路由、确定性授权、有限计划、工具执行、审批/取消/恢复、事件投影、Case Runner、四维报告”的本地闭环；成熟项目领先之处主要不在分层，而在产品面、执行器丰富度、生产存储/身份、工作流编辑与发布、长期知识/记忆、运维和在线评测承载。
 
-当前最值得展示的下一步不是添加 DAG、长期记忆或更多 Agent 抽象，而是把已完成的本地评测、架构检查、失败回流和边界状态写成可复核的展示入口；随后再根据真实部署目标选择身份和持久化方案。`business_correctness` 对 `expected_results.result` 的字段级断言仍是明确的 partial 项。
+下一步优先不是添加 DAG、长期记忆或更多 Agent 抽象，而是让已完成的本地评测、架构检查、失败回流和边界状态具备可复核入口；随后再根据真实部署目标选择身份和持久化方案。`business_correctness` 对 `expected_results.result` 的字段级断言仍是明确的 partial 项。
 
 ## 证据边界
 
 - 本地事实以 `PROGRESS.md`、当前代码、`specs/001-eino-supervisor-template/tasks.md` 和合同测试为准。计划文档、配置字段或接口存在本身不等于功能闭环。
 - 新鲜验证：`go test ./...`、`go test -race ./...`、`go build ./cmd/server/`、`go vet ./...`、`go run ./cmd/archcheck`、`git diff --check`，以及高风险 8 Case、低风险标签选择 3 Case 均通过；这些是当前工作树的本地证据。
-- `examplebusiness/fixture.go` 已接入 `user_query`、`user_summary_query` 和模拟触达的本地 fake 链路，展示 Dataset 可从 HTTP/SSE 入口跑通；这不等于真实 CRM/营销业务，也不等于字段级业务质量基准已完成。
+- `examplebusiness/fixture.go` 已接入 `user_query`、`user_summary_query` 和模拟触达的本地 fake 链路，说明 Dataset 可从 HTTP/SSE 入口跑通；这不等于真实 CRM/营销业务，也不等于字段级业务质量基准已完成。
 - 外部调研使用 Agent Reach 的 Exa 搜索和 GitHub API。Exa 返回过官方文档摘要，但 `agent-reach doctor --json` 无输出超时；GitHub API 可用。调研结果以官方仓库、官方文档和固定 commit 为依据，不以星数作为质量结论。
 
 ## 当前能力清单
@@ -25,7 +25,7 @@
 | Supervisor | 确定性 fake 路由；可选 Eino DeepSeek 适配；模型输出严格 JSON 解析，未知路由失败关闭 | `implemented` | `internal/infrastructure/llm/`；真实 DeepSeek Supervisor 的只读 `/api/chat` 有历史 smoke 证据 |
 | Worker/执行器 | 默认 SingleToolRunner；可选 Eino ADK Runner 和 ApprovedTool/ToolNode；启动时按 Worker 配置分派 | `partial` | 本地 deterministic ToolCallingChatModel 与兼容 HTTP stub 证明 ToolCall 闭环；真实模型驱动的 Eino Worker ToolCall 未验证 |
 | 计划/多 Agent | 每个 run 最多两个有序步骤；逐步重新过 Policy Gate；执行预算限制 steps、calls、retry、cost、deadline | `implemented` | 当前是固定顺序的多 Worker，不是 ReAct、并行、DAG 或开放式自主循环；`internal/domain/agent/contract.go` |
-| 审批与副作用 | side-effect 在批准前阻止执行；批准身份取认证主体；幂等键和审计事件；fake 模拟写入 | `implemented` | 没有真实运营写入；审批展示和业务数据闭环有限；`internal/application/run/`、`internal/infrastructure/tool/` |
+| 审批与副作用 | side-effect 在批准前阻止执行；批准身份取认证主体；幂等键和审计事件；fake 模拟写入 | `implemented` | 没有真实运营写入；审批流程和业务数据闭环有限；`internal/application/run/`、`internal/infrastructure/tool/` |
 | Tool | 注册表、Worker allow-list、Pool 并发/租约/deadline、输入输出合同校验、错误分类；fake、固定 endpoint HTTP GET、受控 MCP | `implemented` | MCP 只调用启动时 allow-list，不动态发现、不支持真实写入 Tool；HTTP Tool 是固定只读 GET |
 | 认证/授权 | Bearer token SHA-256 环境变量验证；映射 tenant/subject；run 重放、审批、resume、cancel 做 owner 校验；和模型动作 Policy 分离 | `partial` | 静态凭证、静态主体；无 OIDC/JWT、RBAC/ABAC、组织/资源目录和 token 生命周期 |
 | 状态/存储 | 内存与版本化文件 Repository、checkpoint、event store；文件使用哈希路径、临时文件和 rename；新进程可读取快照 | `partial` | 文件方案定位单实例；不支持多主写入、数据库 HA、共享租约或跨进程 exactly-once；Eino 应用级跨进程 resume 未证实 |
@@ -65,7 +65,7 @@
 
 当前使用 Go 标准库 `log/slog` 提供 JSON 日志、低基数字段上下文、敏感关键字/常见内部路径脱敏和有界文件 writer；`composition.App` 负责装配和关闭 writer，相关合同测试覆盖敏感字段与轮转边界。
 
-仍未完成的是完整生产诊断合同：运行期每个阶段的统一 `run_id`/`trace_id`/`error_code`/`attempt` 字段、外部错误 fingerprint、完整延迟与审批/恢复指标、告警/SLO 和多实例日志采集。当前 logger 足以支持本地展示，不应被包装成生产日志平台。
+仍未完成的是完整生产诊断合同：运行期每个阶段的统一 `run_id`/`trace_id`/`error_code`/`attempt` 字段、外部错误 fingerprint、完整延迟与审批/恢复指标、告警/SLO 和多实例日志采集。当前 logger 足以支持本地诊断和合同验证，不应被包装成生产日志平台。
 
 ### Trace / Metric：本地关联已接通，生产覆盖仍不完整
 
@@ -102,7 +102,7 @@ HTTP 层再把这些分类映射为稳定状态码和公开错误消息，SSE �
 
 如果按“先补基础再扩业务”排序：
 
-1. **P0：保持本地展示闭环可复现**：固定 Dataset/Runner/Evaluator/报告命令，并在 `PROGRESS.md` 记录实际证据。
+1. **P0：保持本地评测闭环可复现**：固定 Dataset/Runner/Evaluator/报告命令，并在 `PROGRESS.md` 记录实际证据。
 2. **P1：补业务结果字段断言**：完成 T050，解析安全的 `count`、`customer_ids`、`spend_365d_total`，不把原始 Tool payload 写入报告。
 3. **P1：补错误诊断字段和指标**：保留现有错误分类，只增加结构化日志、延迟/错误/重试/审批/恢复指标。
 4. **P2：按真实部署需求补身份、存储和观测**：没有多实例或合规指标前，不提前引入新的平台组件。
@@ -153,9 +153,9 @@ HTTP/RPC middleware
 
 ## 后续计划
 
-### P0：保持可展示的本地闭环
+### P0：保持可复现的本地闭环
 
-T035–T049 已在当前工作树完成并有本地证据：版本化 Dataset、HTTP/SSE Runner、四维确定性报告、失败回流合同、架构检查、CI 接线和可选观测关联。展示时使用 `README.md` 和 `docs/evaluation-method.md` 中的固定命令，不把历史计划或外部服务初始化当成评测结果。
+T035–T049 已在当前工作树完成并有本地证据：版本化 Dataset、HTTP/SSE Runner、四维确定性报告、失败回流合同、架构检查、CI 接线和可选观测关联。本地验证使用 `README.md` 和 `docs/evaluation-method.md` 中的固定命令，不把历史计划或外部服务初始化当成评测结果。
 
 **当前门槛：** 高风险全量 Case 和低风险标签选择都必须可重跑并得到结构化报告；报告必须保留 Case/run/evaluator/evidence 关联。`expected_results.result` 的字段级断言仍由 T050 单独收口。
 
@@ -191,7 +191,7 @@ T035–T049 已在当前工作树完成并有本地证据：版本化 Dataset、
 
 ## 建议的“已完成”定义
 
-后续汇报按以下层级写，不用“支持”一个词混淆：
+能力描述按以下层级区分，不用“支持”一个词混淆：
 
 - **代码存在**：实现文件或接口存在。
 - **合同通过**：本地 fake/单元测试覆盖输入、拒绝和状态不变量。

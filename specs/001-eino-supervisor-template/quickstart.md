@@ -39,7 +39,7 @@ go test ./eval/...
 go test ./... -run 'Evaluation|Case|Evaluator' -count=1
 ```
 
-当前版本 Dataset 实际覆盖正向只读查询、两步汇总、diversity subject、审批后触达/重复 resume、拒绝触达、未知能力、空输入和等待审批取消八个 Case。跨主体访问、超时和失败注入仍由运行时合同测试覆盖，尚未全部纳入这份展示 Dataset；不要把计划中的 Case 清单写成当前评测结果。
+当前版本 Dataset 实际覆盖正向只读查询、两步汇总、diversity subject、审批后触达/重复 resume、拒绝触达、未知能力、空输入和等待审批取消八个 Case。跨主体访问、超时和失败注入仍由运行时合同测试覆盖，尚未全部纳入当前 Dataset；不要把计划中的 Case 清单写成当前评测结果。
 
 ## Full local verification
 

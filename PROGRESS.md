@@ -114,7 +114,7 @@ go run ./cmd/server/ -f ./config.example.toml
 - 默认 DeepSeek 模型也完成新端口 `18107` 的触达回归：Supervisor 生成 `simulated_outreach` 审批计划，批准前 SSE 未出现 `tool_call`；批准后 resume 到唯一 `completed`，文本为“已模拟触达匿名用户：4”。重复 resume 只重放原有 9 个事件、单个 `tool_call` 和单个终态；此次调用使用本地模拟 Tool，不是外部业务写入。
 - 新端口 `18095` 已实际验证 `/healthz`、只读 `/api/chat`、两步串行、模拟触达审批前无执行、批准后 resume、重复 resume、reject 和 cancel；SSE 均保持唯一终态。
 - MySQL healthy 容器和宿主机 Go 服务新端口 `18096` 已实际验证订单查询、审批插入和重复 resume；重复 resume 返回同一 `order_id=3`，未新增订单。
-- 对应任务账本见 `specs/001-eino-supervisor-template/tasks.md`；M9-M11 链路收口后已单独完成 Langfuse 多角度 trace 评测并汇报，不能用配置或 exporter 初始化代替评测证据。
+- 对应任务账本见 `specs/001-eino-supervisor-template/tasks.md`；M9-M11 链路收口后已单独完成 Langfuse 多角度 trace 评测并记录，不能用配置或 exporter 初始化代替评测证据。
 - 最新门禁已实际通过：`go test ./...`、`go test -race ./...`、`go build ./cmd/server/`、`go vet ./...`、`git diff --check`。
 - 修复 OTLP base endpoint 未追加 signal path 的问题：`http://localhost:3001/api/public/otel` 现在正确导出到 `/v1/traces` 和 `/v1/metrics`，并有 `normalizeOTLPEndpoint` 单元测试。
 - M9-M11 链路收口后完成 Langfuse 多角度运行评测；只读、两步串行、审批恢复和重复 resume 均在 Langfuse 项目 `agent-runtime` 中产生可检索 trace。评测请求、trace ID、结构性评分、失败分类和前置条件见 `docs/langfuse-evaluation-20260928.md`。
@@ -122,7 +122,7 @@ go run ./cmd/server/ -f ./config.example.toml
 
 ## Convergence 评测闭环（2026-09-28）
 
-- `cmd/eval` 现在在写入 JSON/JSONL 报告后同步打印可读摘要：Case 总数、通过/失败数、终态和 fake 写入次数；便于现场展示，机器报告仍是 CI 事实来源。
+- `cmd/eval` 现在在写入 JSON/JSONL 报告后同步打印可读摘要：Case 总数、通过/失败数、终态和 fake 写入次数；便于快速查看，机器报告仍是 CI 事实来源。
 - T035-T037、T045 已实现：`eval/` 提供严格 Dataset loader（含动态/secret-like/URL 拒绝）、正向/负向/边界/多样性八 Case、真实本地 HTTP/SSE Runner（仅 pre-call 安全失败重试，unknown outcome 不重试）、四维确定性 Evaluator 和 `cmd/eval` JSON/JSONL 报告；高风险全量实际结果为 `passed=8 failed=0`，JSONL 输出为 9 行（envelope + 8 Case），低风险 `audience-query` 选择实际结果为 `passed=3 failed=0`。
 - T038 已实现：`eval/feedback.go` 提供 PR 风险、失败 taxonomy、人工 disposition、Judge/rubric 合同和脱敏 digest；Judge 仍是 advisory，不改变硬门禁。
 - T039 已实现：`cmd/archcheck` 实际输出 `package dependency direction OK`；`.github/workflows/ci.yml` 接入 archcheck、Go 测试、评测测试和本地 Case Runner。Required Checks/Reviewers 仍需托管平台设置，未将 workflow 存在误报成门禁已生效。

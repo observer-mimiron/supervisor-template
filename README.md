@@ -1,6 +1,6 @@
 # Eino Supervisor Template
 
-这是一个 Go/Eino Agent 参考模板：用确定性的 Policy Gate、审批、幂等、可恢复执行和版本化评测集，展示如何在 AI Coding 场景守住 Agent 的架构与运行边界。
+这是一个 Go/Eino Agent 参考模板，包含确定性的 Policy Gate、审批、幂等、可恢复执行和版本化评测集。
 
 它是可运行的工程样例，不是生产级 Agent 平台。服务默认使用 DeepSeek（API key 从环境变量读取）；fake 模型、合成数据和本地存储用于无外部依赖的合同验证，不连接真实 CRM 或营销渠道。
 
@@ -8,7 +8,7 @@
 
 ### 项目解决什么问题
 
-AI 可以快速生成代码，但不会自动理解模块边界。Agent 即使返回了看似正确的文本，也可能越权调用 Tool、绕过审批、重复产生副作用，或在恢复时重复执行。本项目把模型输出限制为候选路由，把权限、状态、审批、幂等、终态和公开事件交给确定性代码，再用 HTTP/SSE Case Runner 和报告验证真实入口行为。
+模型输出即使结构正确，也可能越权调用 Tool、绕过审批、重复产生副作用，或在恢复时重复执行。本项目把模型输出限制为候选路由，把权限、状态、审批、幂等、终态和公开事件交给确定性代码，再用 HTTP/SSE Case Runner 和报告验证入口行为。
 
 ### 运行链路
 
@@ -59,7 +59,7 @@ Langfuse 只承载可选观测和运行评测证据，不拥有业务状态，�
 | 运行状态多人维护 | Application/Manager 是唯一 owner | `internal/application/run`、架构文档和测试 | `implemented` |
 | 提交前中断导致未知结果 | `RUN_OUTCOME_UNKNOWN`，不自动重试 | `TestUnknownRunnerOutcomeWaitsForReconciliationAndNeverRetries` | `implemented` |
 | 未注册能力被调用 | 启动期注册校验，失败关闭 | `RuntimeCatalog`、`cmd/archcheck`、CI | `implemented` |
-| AI 改坏跨层依赖 | `interfaces -> application -> domain` | `cmd/archcheck` + `.github/workflows/ci.yml` | `implemented` |
+| 跨层依赖被改坏 | `interfaces -> application -> domain` | `cmd/archcheck` + `.github/workflows/ci.yml` | `implemented` |
 | 观测后端故障改变业务结果 | exporter/log/snapshot 走 degraded signal | observability 合同测试 | `implemented` |
 
 CI workflow 已接入架构检查、Go 测试、评测包测试和本地 Case Runner；托管平台的 Required Checks/Required Reviewers 仍需在仓库设置中启用，不能只凭 workflow 文件宣称合并门禁已生效。
@@ -87,7 +87,7 @@ go run ./cmd/eval \
   -config ./config.example.toml
 ```
 
-命令同时保留 JSON 报告，并在终端打印每个 Case 的 `PASS/FAIL`、终态和副作用写入次数，方便现场展示；JSON 报告才是 CI 和后续分析的事实来源。
+命令同时保留 JSON 报告，并在终端打印每个 Case 的 `PASS/FAIL`、终态和副作用写入次数，便于快速查看；JSON 报告才是 CI 和后续分析的事实来源。
 
 本命令默认按未知风险安全地跑完整 Dataset。当前 Dataset 有 8 个 Case，覆盖 `positive`、`negative`、`boundary` 和 `diversity`；最近一次本地运行结果为 `passed=8 failed=0`。普通变更可以按影响标签缩小范围：
 
@@ -123,7 +123,7 @@ go run ./cmd/server/ -f ./config.example.toml
 
 `config.example.toml` 默认使用 DeepSeek，根目录 `.env` 或环境变量可覆盖 provider；启动日志会打印实际 `model_provider`。需要无外部模型的 fake smoke 时显式加 `-fake`。服务提供 `/healthz`、`/api/chat`、approval、resume 和 cancel。
 
-## 最值得展示的三个 Case
+## 代表性 Case
 
 1. `positive-serial-summary`：两个已注册 Worker 按固定顺序执行，第二步只消费第一步的有界结果。
 2. `negative-reject-outreach`：拒绝审批后进入 `failed`，没有 `tool_call`，fake 写入数保持为 0。
@@ -148,10 +148,6 @@ go run ./cmd/server/ -f ./config.example.toml
 | 跨进程 exactly-once | `deferred` | 文件快照不提供数据库级或分布式 exactly-once |
 
 “implemented”只表示当前代码和本地验证达到该范围；真实模型驱动的 Eino Worker ToolCall、跨进程 Eino resume、完整 OIDC/JWT/RBAC 和生产运维语义仍保持 `partial` 或 `deferred`。详见 [docs/current-capability-and-gap-report.md](./docs/current-capability-and-gap-report.md) 和 [PROGRESS.md](./PROGRESS.md)。
-
-## AI Coding 实践
-
-仓库把 AI 生成代码放在可审查的边界内：先读宪法、架构和 Spec，再做小范围实现；每个跨层改动都补合同测试、失败路径和可重放入口；最后运行测试、race、静态依赖检查、smoke 和评测。AI 负责生成与扫描，人负责边界、风险和验收。具体证据链与失败案例见 [docs/ai-coding-practice.md](./docs/ai-coding-practice.md)。
 
 ## 边界
 
