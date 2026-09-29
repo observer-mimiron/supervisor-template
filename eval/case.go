@@ -55,3 +55,44 @@ type ForbiddenEffects struct {
 }
 
 type Duration struct{ time.Duration }
+
+// RequiredEvidence returns the minimum evidence contract for a Case. The
+// dataset may request additional evidence, but it cannot opt out of these
+// invariants.
+func RequiredEvidence(item Case) []string {
+	seen := make(map[string]bool)
+	add := func(requirement string) {
+		if !seen[requirement] {
+			seen[requirement] = true
+		}
+	}
+	add("http_statuses")
+	add("trace_correlation")
+	add("cleanup")
+	if item.ExpectedResults.Terminal != "request_error" {
+		add("events")
+		add("sequence")
+		add("run_state")
+	}
+	for _, eventType := range item.ExpectedResults.EventTypes {
+		if eventType == "tool_call" {
+			add("tool_calls")
+		}
+		if eventType == "approval_required" {
+			add("approval")
+		}
+	}
+	for _, step := range item.RequestSteps {
+		if step.Action == "approval" {
+			add("approval")
+		}
+	}
+	order := []string{"events", "tool_calls", "run_state", "trace_correlation", "approval", "cleanup", "http_statuses", "sequence"}
+	result := make([]string, 0, len(seen))
+	for _, requirement := range order {
+		if seen[requirement] {
+			result = append(result, requirement)
+		}
+	}
+	return result
+}

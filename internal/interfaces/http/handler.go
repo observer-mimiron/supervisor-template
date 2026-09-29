@@ -289,6 +289,8 @@ func statusFor(err error) int {
 			return http.StatusConflict
 		case agent.ErrorInvalidState:
 			return http.StatusConflict
+		case agent.ErrorRunBusy, agent.ErrorLeaseLost:
+			return http.StatusConflict
 		case agent.ErrorBudgetExceeded:
 			return http.StatusTooManyRequests
 		case agent.ErrorInvalidOutput:

@@ -134,6 +134,36 @@ go run ./cmd/server/ -f ./config.example.toml
 - Langfuse 仍按 M12 单独报告；本轮本地评测不把 OTLP/Langfuse 配置或 exporter 初始化当作在线 Judge/多角度评测证据。
 - T055 收敛文档任务已完成：`plan.md` 的范围和限制已对齐 M9-M12 运行链路及评测现状。当前 DeepSeek 默认模型触达回归见上文；工作区未发现临时调试文件或 `DEBUG fmt.Printf`。
 
+## Durable Execution Closure（2026-09-29）
+
+- `implemented`：新增 `RunLease`/`RunLeaseStore` 应用合同；memory、file 和现有 GORM/MySQL adapter 支持 owner token、expiry、claim、ownership check 和 owner-checked release。composition 已按 memory/file/MySQL 选择并注入租约，健康检查拒绝缺少租约实现的装配。
+- `implemented`：`Start`、`Approve`、`Resume`、`Cancel` 均先 claim Run lease，Repository/Checkpoint/EventStore 写入前检查 ownership，所有退出路径释放 lease。file lease 使用本地 `flock`，锁等待响应 context cancel；不宣称跨主机共享文件协调。
+- `implemented`：Plan/Step 快照保存 `Attempts`、`AttemptStatus`、`ErrorClass`、`UpdatedAt` 和 terminal 状态。Runner 前的 `prepared` 标记可在恢复时回到 pending；已进入 `running` 的快照在 lease 接管时转为 `waiting_reconciliation`，不会自动重试未知副作用。
+- `implemented`：新增竞争 claim、expiry takeover、文件重启、终态事件追加失败修复和服务级 lease 测试；已有 unknown outcome、重复 resume、事件序号/唯一终态、checkpoint/plan 部分失败测试继续通过。
+- `partial`：Plan、Checkpoint、EventStore 是独立存储边界，当前是可恢复的 at-least-once projection，不是跨存储 exactly-once；lease renewal、数据库事务/outbox 未实现。可选 GORM/MySQL adapter 不承载完整 Runtime 状态，多实例恢复未验证且不是当前单实例目标的要求。
+- `deferred`：Temporal/LangGraph 服务端语义、队列/DAG、跨主机 file lease、外部副作用 exactly-once、强制终止不响应 context 的进程。
+
+本轮真实验证：`go test ./...`、`go test -race ./...`、`go build ./cmd/server/`、`go vet ./...`、`go run ./cmd/archcheck`、指定 enterprise eval（8 cases，8 passed/0 failed）和 `git diff --check` 均通过。Eval 终态为 `completed`、`failed`、空（invalid input case）或 `canceled`，fake write count 分别在每个 Case 摘要中输出。
+
+## Evaluation Evidence Contract（2026-09-29）
+
+- `implemented`：`RuntimeSnapshot`/Runner 现在记录注册 Tool 的 risk、requires-approval 和 idempotency 元数据；side-effect evaluator 按合同判断审批前置，不再硬编码 `simulated_outreach`。
+- `implemented`：Dataset loader 要求每个实际 Case 声明四个硬评测维度，并按正常 Run、Tool、审批和 request error 路径校验最小 evidence matrix；Evaluator 固定执行四个维度，Case 声明只作为不可关闭的合同校验，缺失声明或通用必需证据会硬失败。
+- `implemented`：Evaluator 增加统一 evidence integrity 校验：Evidence 必须关联非空且匹配的 Case/版本/Run，事件必须带非空且唯一的 EventID、匹配 Event RunID/首个 trace，sequence 从 1 连续递增，Terminal 与唯一 terminal event 一致，且 Policy/Plan 证据必须先于 `tool_call`。新增反绕过测试覆盖缺失 EventID、缺失维度/证据、伪造 terminal、重复 EventID、RunID/trace mismatch、Policy 乱序和匿名 side-effect；非法 risk/tag 选择不会生成空的假阳性报告。
+- `deferred`：MySQL lease 集成测试提供 `MYSQL_TEST_DSN` 可选入口；本轮因未设置 DSN 跳过。真实 MySQL 多实例恢复不在当前单实例目标范围内；若部署需求改变，再在真实目标数据库上验证。MySQL 示例订单 Tool 与 lease adapter 继续复用 GORM，但 Repository/Checkpoint/EventStore 仍使用 memory/file，不是完整 MySQL Runtime 持久化。
+
+最新本地评测命令：`go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v1.json -report ./tmp/eval-report-enterprise-v2.json -code-version enterprise-execution-v1 -config ./config.example.toml`，8 cases，8 passed / 0 failed；每个 Case 的 terminal 和 fake write count 已打印。
+
+本轮证据合同收口后的复验仍通过：`go test ./...`、`go test -race ./...`、`go build ./cmd/server/`、`go vet ./...`、`go run ./cmd/archcheck`、指定 enterprise eval（8 cases，8 passed / 0 failed）和 `git diff --check`。`go test -v ./internal/infrastructure/persistence/mysql` 显示 fake GORM tracing/输入合同通过，`TestMySQLRunLeaseContract` 因未设置 `MYSQL_TEST_DSN` 跳过。该真实 MySQL 多实例恢复证据当前 deferred，因单实例部署目标不需要，不作为本轮门禁；MySQL adapter 不是完整 Runtime Repository/Checkpoint/EventStore。
+
+## Evaluation Anti-bypass Closure（2026-09-29）
+
+- `implemented`：side-effect evaluator 现在要求 fake write 至少有一个注册且声明 `Risk=side_effect` 的 Tool call；只读 Tool call 不能为写入提供归因。
+- `implemented`：审批证据按完整 `step_id + worker_id + tool_id` 绑定，不能用同一步的其他 Worker 或 Tool 借用批准；新增同一步不同 Worker、只读写入和重复 side-effect call 合同测试。
+- `implemented`：同一绑定键重复产生 side-effect `tool_call` 时硬失败，保留 `tool_contract` 等更具体的首个失败分类。
+
+本轮增量及完整验证均通过：`go test ./eval/evaluator`、`go test ./...`、`go test -race ./...`、`go build ./cmd/server/`、`go vet ./...`、`go run ./cmd/archcheck`、enterprise eval（8 cases，8 passed / 0 failed）和 `git diff --check`。
+
 ## 关键约束
 
 - `.specify/memory/constitution.md` 未修改，仍是项目唯一宪法。

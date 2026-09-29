@@ -2,8 +2,13 @@ package mysql
 
 import (
 	"bytes"
+	"context"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/observer-mimiron/supervisor-template/internal/application"
 )
 
 func TestDecodeQueryRequiresExactlyOnePositiveSelector(t *testing.T) {
@@ -68,5 +73,45 @@ func TestNormalizeAmount(t *testing.T) {
 	}
 	if strings.Contains(normalizeAmount("0.00"), "-") {
 		t.Fatal("normalized amount must not be negative")
+	}
+}
+
+func TestMySQLRunLeaseContract(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("MYSQL_TEST_DSN"))
+	if dsn == "" {
+		t.Skip("MYSQL_TEST_DSN 未设置；真实 MySQL lease 恢复测试未在当前环境运行")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	adapter, err := Open(ctx, dsn, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adapter.Close()
+	if err := adapter.AutoMigrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	runID := "contract-lease-" + now.Format("20060102150405.000000000")
+	first := application.RunLease{RunID: runID, OwnerToken: "owner-1", ExpiresAt: now.Add(500 * time.Millisecond)}
+	second := application.RunLease{RunID: runID, OwnerToken: "owner-2", ExpiresAt: now.Add(time.Second)}
+	defer adapter.DB().Exec("DELETE FROM run_leases WHERE run_id = ?", runID)
+	claimed, err := adapter.Claim(ctx, first, now)
+	if err != nil || !claimed {
+		t.Fatalf("first claim=%v err=%v", claimed, err)
+	}
+	claimed, err = adapter.Claim(ctx, second, now)
+	if err != nil || claimed {
+		t.Fatalf("live competing claim=%v err=%v", claimed, err)
+	}
+	claimed, err = adapter.Claim(ctx, second, first.ExpiresAt)
+	if err != nil || !claimed {
+		t.Fatalf("expired takeover=%v err=%v", claimed, err)
+	}
+	if owned, err := adapter.Owns(ctx, first, first.ExpiresAt); err != nil || owned {
+		t.Fatalf("old owner owns expired lease=%v err=%v", owned, err)
+	}
+	if err := adapter.Release(ctx, second); err != nil {
+		t.Fatal(err)
 	}
 }

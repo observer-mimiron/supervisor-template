@@ -59,11 +59,16 @@ func TestFileBackedServiceRestoresApprovalAcrossRestart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		leases, err := persistence.NewFileRunLeaseStore(filepath.Join(dir, "leases"))
+		if err != nil {
+			t.Fatal(err)
+		}
 		tools := toolinfra.NewFakeRegistry()
 		deps := application.Dependencies{
 			Repository: repository,
 			Checkpoint: checkpoints,
 			EventBus:   events,
+			Leases:     leases,
 			Supervisor: llm.NewFakeSupervisor(),
 			Policy: agent.NewPolicyGate([]operation.WorkerContract{{
 				WorkerID: "user_analysis", AllowedTools: []string{"user_query", "simulated_outreach"},
@@ -98,6 +103,19 @@ func TestFileBackedServiceRestoresApprovalAcrossRestart(t *testing.T) {
 	}
 	if tools.OutreachCount() != 1 || terminalCount(events) != 1 {
 		t.Fatalf("restart resume did not complete once: count=%d events=%#v", tools.OutreachCount(), second.Events(runID))
+	}
+	plan, ok := second.deps.Repository.GetPlan(runID)
+	if !ok || plan.Status != agent.RunCompleted || plan.Steps[0].Attempts != 1 || plan.UpdatedAt.IsZero() || plan.Steps[0].UpdatedAt.IsZero() {
+		t.Fatalf("restart lost durable attempt/update state: %#v", plan)
+	}
+	checkpoint, ok := second.deps.Checkpoint.Get(runID)
+	if !ok || checkpoint.Version < 1 || checkpoint.Status != agent.RunCompleted {
+		t.Fatalf("restart lost durable checkpoint: %#v found=%v", checkpoint, ok)
+	}
+	for index, event := range events {
+		if event.Sequence != int64(index+1) {
+			t.Fatalf("restart event sequence = %d at index %d", event.Sequence, index)
+		}
 	}
 }
 

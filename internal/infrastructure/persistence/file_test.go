@@ -75,3 +75,31 @@ func TestFileRepositoryRejectsCorruptAndUnsupportedVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestFileRepositoryPersistsDurabilityFields(t *testing.T) {
+	repo, err := NewFileRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := time.Unix(1700000000, 0).UTC()
+	plan, err := agent.NewExecutionPlan("plan-fields", "run-fields", []agent.PlanStep{{
+		StepID: "step-1", ToolID: "user_query", Status: agent.StepPending,
+	}}, 1, updated.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ErrorClass = agent.ClassUnknownOutcome
+	plan.UpdatedAt = updated
+	plan.Steps[0].ErrorClass = agent.ClassUnknownOutcome
+	plan.Steps[0].UpdatedAt = updated
+	if err := repo.SavePlan(plan); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok, err := repo.LoadPlan(plan.RunID)
+	if err != nil || !ok {
+		t.Fatalf("loaded plan = %#v, %v, %v", loaded, ok, err)
+	}
+	if loaded.ErrorClass != plan.ErrorClass || !loaded.UpdatedAt.Equal(updated) || loaded.Steps[0].ErrorClass != plan.Steps[0].ErrorClass || !loaded.Steps[0].UpdatedAt.Equal(updated) {
+		t.Fatalf("durability fields were not persisted: %#v", loaded)
+	}
+}

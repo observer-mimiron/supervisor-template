@@ -14,7 +14,7 @@
       "request_steps": [{"action": "chat", "message": "分析沉睡客户", "conversation_id": "eval-positive-1"}],
       "expected_results": {"terminal": "completed", "event_types": ["started", "decision", "plan", "progress", "tool_call", "progress", "text", "completed"], "result": {"count": 4, "customer_ids": ["cust-001", "cust-002", "cust-006", "cust-008"], "spend_365d_total": 6200}},
       "forbidden_side_effects": {"tool_ids": ["simulated_outreach"], "max_writes": 0},
-      "evidence_requirements": ["events", "tool_calls", "run_state", "trace_correlation"],
+      "evidence_requirements": ["events", "tool_calls", "run_state", "trace_correlation", "cleanup", "http_statuses", "sequence"],
       "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
       "timeout": "5s", "retry_budget": 1, "idempotency_key": "eval-positive-1", "cleanup_policy": "isolated_run"
     },
@@ -29,7 +29,7 @@
       "request_steps": [{"action": "chat", "message": "先分析再总结沉睡客户", "conversation_id": "eval-serial-1"}],
       "expected_results": {"terminal": "completed", "event_types": ["started", "decision", "plan", "progress", "tool_call", "progress", "text", "progress", "tool_call", "progress", "text", "completed"]},
       "forbidden_side_effects": {"tool_ids": ["simulated_outreach"], "max_writes": 0},
-      "evidence_requirements": ["events", "tool_calls", "run_state", "trace_correlation"],
+      "evidence_requirements": ["events", "tool_calls", "run_state", "trace_correlation", "cleanup", "http_statuses", "sequence"],
       "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
       "timeout": "5s", "retry_budget": 1, "idempotency_key": "eval-serial-1", "cleanup_policy": "isolated_run"
     },
@@ -44,7 +44,7 @@
       "request_steps": [{"action": "chat", "message": "查询沉睡客户", "conversation_id": "eval-diversity-1"}],
       "expected_results": {"terminal": "completed", "event_types": ["started", "decision", "plan", "progress", "tool_call", "progress", "text", "completed"], "result": {"count": 4, "customer_ids": ["cust-001", "cust-002", "cust-006", "cust-008"], "spend_365d_total": 6200}},
       "forbidden_side_effects": {"tool_ids": ["simulated_outreach"], "max_writes": 0},
-      "evidence_requirements": ["events", "tool_calls", "run_state", "trace_correlation", "cleanup"],
+      "evidence_requirements": ["events", "tool_calls", "run_state", "trace_correlation", "cleanup", "http_statuses", "sequence"],
       "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
       "timeout": "5s", "retry_budget": 1, "idempotency_key": "eval-diversity-1", "cleanup_policy": "isolated_run"
     },
@@ -59,7 +59,7 @@
       "request_steps": [{"action": "chat", "message": "模拟触达沉睡客户", "conversation_id": "eval-outreach-1"}, {"action": "approval", "decision": "approve"}, {"action": "resume"}, {"action": "repeat"}],
       "expected_results": {"terminal": "completed", "event_types": ["started", "decision", "plan", "approval_required", "progress", "tool_call", "progress", "text", "completed"]},
       "forbidden_side_effects": {"tool_ids": [], "max_writes": 1},
-      "evidence_requirements": ["events", "tool_calls", "approval", "run_state", "trace_correlation"],
+      "evidence_requirements": ["events", "tool_calls", "approval", "run_state", "trace_correlation", "cleanup", "http_statuses", "sequence"],
       "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
       "timeout": "5s", "retry_budget": 0, "idempotency_key": "eval-outreach-1", "cleanup_policy": "isolated_run"
     },
@@ -74,7 +74,7 @@
       "request_steps": [{"action": "chat", "message": "模拟触达沉睡客户", "conversation_id": "eval-reject-1"}, {"action": "approval", "decision": "reject"}],
       "expected_results": {"terminal": "failed", "event_types": ["started", "decision", "plan", "approval_required", "failed"]},
       "forbidden_side_effects": {"tool_ids": ["simulated_outreach"], "max_writes": 0},
-      "evidence_requirements": ["events", "approval", "run_state"],
+      "evidence_requirements": ["events", "approval", "run_state", "trace_correlation", "cleanup", "http_statuses", "sequence"],
       "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
       "timeout": "5s", "retry_budget": 0, "idempotency_key": "eval-reject-1", "cleanup_policy": "isolated_run"
     },
@@ -89,7 +89,7 @@
       "request_steps": [{"action": "chat", "message": "请求未知能力", "conversation_id": "eval-unknown-1"}],
       "expected_results": {"terminal": "failed", "event_types": ["started", "decision", "failed"]},
       "forbidden_side_effects": {"tool_ids": ["simulated_outreach"], "max_writes": 0},
-      "evidence_requirements": ["events", "run_state", "trace_correlation"],
+      "evidence_requirements": ["events", "run_state", "trace_correlation", "cleanup", "http_statuses", "sequence"],
       "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
       "timeout": "5s", "retry_budget": 0, "idempotency_key": "eval-unknown-1", "cleanup_policy": "isolated_run"
     },
@@ -104,7 +104,7 @@
       "request_steps": [{"action": "chat", "message": "", "conversation_id": "eval-invalid-1"}],
       "expected_results": {"terminal": "request_error", "event_types": [], "result": {"http_status": 400}},
       "forbidden_side_effects": {"tool_ids": ["simulated_outreach"], "max_writes": 0},
-      "evidence_requirements": ["http_statuses", "trace_correlation"],
+      "evidence_requirements": ["http_statuses", "trace_correlation", "cleanup"],
       "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
       "timeout": "5s", "retry_budget": 0, "idempotency_key": "eval-invalid-1", "cleanup_policy": "isolated_run"
     },
@@ -119,7 +119,7 @@
       "request_steps": [{"action": "chat", "message": "模拟触达沉睡客户", "conversation_id": "eval-cancel-1"}, {"action": "cancel"}],
       "expected_results": {"terminal": "canceled", "event_types": ["started", "decision", "plan", "approval_required", "canceled"]},
       "forbidden_side_effects": {"tool_ids": ["simulated_outreach"], "max_writes": 0},
-      "evidence_requirements": ["events", "approval", "run_state", "trace_correlation"],
+      "evidence_requirements": ["events", "approval", "run_state", "trace_correlation", "cleanup", "http_statuses", "sequence"],
       "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
       "timeout": "5s", "retry_budget": 0, "idempotency_key": "eval-cancel-1", "cleanup_policy": "isolated_run"
     }

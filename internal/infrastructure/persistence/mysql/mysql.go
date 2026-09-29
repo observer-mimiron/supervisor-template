@@ -20,6 +20,7 @@ import (
 	"gorm.io/plugin/opentelemetry/tracing"
 
 	"go.opentelemetry.io/otel/trace"
+	"github.com/observer-mimiron/supervisor-template/internal/application"
 )
 
 const (
@@ -59,6 +60,14 @@ type Order struct {
 	User        User      `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 	Product     Product   `gorm:"foreignKey:ProductID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 }
+
+type runLeaseRow struct {
+	RunID      string    `gorm:"primaryKey;size:128"`
+	OwnerToken string    `gorm:"size:64;not null"`
+	ExpiresAt  time.Time `gorm:"type:datetime(3);not null;index"`
+}
+
+func (runLeaseRow) TableName() string { return "run_leases" }
 
 type queryInput struct {
 	UserID  *uint64 `json:"user_id"`
@@ -130,7 +139,44 @@ func (a *Adapter) AutoMigrate(ctx context.Context) error {
 	if a == nil || a.db == nil {
 		return errors.New("MySQL adapter 未装配")
 	}
-	return a.db.WithContext(ctx).AutoMigrate(&User{}, &Product{}, &Order{})
+	return a.db.WithContext(ctx).AutoMigrate(&User{}, &Product{}, &Order{}, &runLeaseRow{})
+}
+
+// Claim atomically creates a lease or replaces an expired lease for one Run.
+func (a *Adapter) Claim(ctx context.Context, lease application.RunLease, now time.Time) (bool, error) {
+	if err := validateLease(ctx, lease, now); err != nil {
+		return false, err
+	}
+	result := a.db.WithContext(ctx).Exec(
+		"INSERT INTO run_leases (run_id, owner_token, expires_at) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE owner_token = IF(expires_at <= ?, VALUES(owner_token), owner_token), expires_at = IF(expires_at <= ?, VALUES(expires_at), expires_at)",
+		lease.RunID, lease.OwnerToken, lease.ExpiresAt, now, now,
+	)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return a.Owns(ctx, lease, now)
+}
+
+func (a *Adapter) Owns(ctx context.Context, lease application.RunLease, now time.Time) (bool, error) {
+	var count int64
+	err := a.db.WithContext(ctx).Model(&runLeaseRow{}).
+		Where("run_id = ? AND owner_token = ? AND expires_at > ?", lease.RunID, lease.OwnerToken, now).
+		Count(&count).Error
+	return count == 1, err
+}
+
+func (a *Adapter) Release(ctx context.Context, lease application.RunLease) error {
+	return a.db.WithContext(ctx).Where("run_id = ? AND owner_token = ?", lease.RunID, lease.OwnerToken).Delete(&runLeaseRow{}).Error
+}
+
+func validateLease(ctx context.Context, lease application.RunLease, now time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if lease.RunID == "" || lease.OwnerToken == "" || !lease.ExpiresAt.After(now) {
+		return errors.New("run lease 参数非法")
+	}
+	return nil
 }
 
 // Seed inserts a tiny deterministic local fixture. It is opt-in and safe to

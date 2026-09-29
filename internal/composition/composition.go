@@ -48,16 +48,31 @@ type App struct {
 }
 
 // RuntimeSnapshot is the immutable startup capability view used by local
-// evaluation evidence. It contains only registered IDs and worker allow-lists.
+// evaluation evidence. It contains registered IDs, worker allow-lists and
+// the safety metadata needed to classify Tool calls without naming a business Tool.
+type ToolMetadata struct {
+	Risk                string `json:"risk"`
+	RequiresApproval    bool   `json:"requires_approval"`
+	IdempotencyRequired bool   `json:"idempotency_required"`
+}
+
 type RuntimeSnapshot struct {
-	ToolIDs     []string
-	WorkerTools map[string][]string
+	ToolIDs      []string
+	WorkerTools  map[string][]string
+	ToolMetadata map[string]ToolMetadata
 }
 
 func (s RuntimeSnapshot) clone() RuntimeSnapshot {
-	clone := RuntimeSnapshot{ToolIDs: append([]string(nil), s.ToolIDs...), WorkerTools: make(map[string][]string, len(s.WorkerTools))}
+	clone := RuntimeSnapshot{
+		ToolIDs:      append([]string(nil), s.ToolIDs...),
+		WorkerTools:  make(map[string][]string, len(s.WorkerTools)),
+		ToolMetadata: make(map[string]ToolMetadata, len(s.ToolMetadata)),
+	}
 	for workerID, tools := range s.WorkerTools {
 		clone.WorkerTools[workerID] = append([]string(nil), tools...)
+	}
+	for toolID, metadata := range s.ToolMetadata {
+		clone.ToolMetadata[toolID] = metadata
 	}
 	return clone
 }
@@ -150,6 +165,7 @@ func New(cfg config.Config) (*App, error) {
 	var repository application.Repository = persistence.NewMemoryRepository()
 	var checkpoints application.CheckpointStore = checkpoint.NewMemoryStore()
 	var eventStore application.EventStore = eventbus.NewMemoryBus()
+	var leases application.RunLeaseStore = persistence.NewMemoryRunLeaseStore()
 	var memoryStore appmemory.Store = memoryinfra.NewStore()
 	if cfg.Storage.Backend == "file" {
 		repository, err = persistence.NewFileRepository(filepath.Join(cfg.Storage.Dir, "runs"))
@@ -165,6 +181,10 @@ func New(cfg config.Config) (*App, error) {
 			return nil, fileErr
 		}
 		eventStore = fileEvents
+		leases, err = persistence.NewFileRunLeaseStore(filepath.Join(cfg.Storage.Dir, "leases"))
+		if err != nil {
+			return nil, err
+		}
 		memoryStore, err = memoryinfra.OpenFileStore(filepath.Join(cfg.Storage.Dir, "memory", "working.json"))
 		if err != nil {
 			return nil, err
@@ -230,6 +250,7 @@ func New(cfg config.Config) (*App, error) {
 	}
 	contracts := toolinfra.ContractsFor(userQuery.Implementation)
 	if mysqlAdapter != nil {
+		leases = mysqlAdapter
 		contracts = toolinfra.ContractsForMySQL(userQuery.Implementation)
 	}
 	policy := agent.NewPolicyGate(workers, contracts)
@@ -258,6 +279,7 @@ func New(cfg config.Config) (*App, error) {
 		Repository:    repository,
 		Checkpoint:    checkpoints,
 		EventBus:      events,
+		Leases:        leases,
 		Supervisor:    supervisor,
 		Policy:        policy,
 		RunAuth:       authinfra.OwnerRunAuthorizer{},
@@ -269,10 +291,17 @@ func New(cfg config.Config) (*App, error) {
 		Observer:      observation,
 		Budget:        budget,
 	}
-	snapshot := RuntimeSnapshot{WorkerTools: make(map[string][]string)}
+	snapshot := RuntimeSnapshot{WorkerTools: make(map[string][]string), ToolMetadata: make(map[string]ToolMetadata)}
 	for toolID, tool := range catalog.Tools() {
 		if tool.Enabled {
 			snapshot.ToolIDs = append(snapshot.ToolIDs, toolID)
+		}
+	}
+	for _, contract := range contracts {
+		snapshot.ToolMetadata[contract.ToolID] = ToolMetadata{
+			Risk:                contract.Risk,
+			RequiresApproval:    contract.RequiresApproval,
+			IdempotencyRequired: contract.IdempotencyRequired,
 		}
 	}
 	sort.Strings(snapshot.ToolIDs)

@@ -123,6 +123,8 @@
 - **FR-030**: 系统 MUST 通过标准 OpenTelemetry OTLP/HTTP 接入 Langfuse，使用配置化 endpoint、service name 和环境变量 headers；API key、Authorization 和用户内容不得写入配置文件、日志、Trace 属性或事件正文。
 - **FR-031**: Langfuse 导出 MUST 是可选观测依赖；未配置或不可用时，业务状态、审批、幂等、错误和终态合同 MUST 不受影响，并产生结构化降级信号。默认合同测试 MUST 使用本地 fake/collector stub，不要求真实 Langfuse 凭证。
 - **FR-032**: 仓库 MUST 提供 Docker Compose 依赖入口，仅启动上游 MySQL 以及可选 observability profile 的 OTel Collector；Go 服务 MUST 通过宿主机 `go run` 启动并连接宿主机暴露的依赖。Langfuse 可以是外部 OTLP 目标，不要求将其存储平台一并部署。宿主机 `go test ./...` 和 `go run` 路径 MUST 保持可用且不依赖 Docker。
+- **FR-033**: Run 的持久化快照 MUST 包含计划/步骤状态、attempt、终态、错误分类和更新时间；同一个 Run MUST 通过带 owner token 和到期时间的持久租约串行化执行及状态写入，过期租约允许新 owner 接管。已持久化为 in-flight 的步骤恢复时 MUST 进入 reconciliation，不得推测 Tool 未执行并自动重试。
+- **FR-034**: Plan、checkpoint 和 event store 未处于同一数据库事务时，系统 MUST 把部分失败保留为可恢复状态，并由 Resume 根据持久化 Plan 修复 checkpoint/event 投影；文档和接口 MUST 不宣称跨存储 exactly-once。副作用未知结果 MUST 继续走既有 reconciliation 合同。
 
 ### Key Entities *(include if feature involves data)*
 
@@ -155,6 +157,7 @@
 - **SC-014**: 在本地单实例、无外部观测后端的默认测试环境中，业务结果 MUST 与启用本地 OTLP/文件观测时一致；跨实例聚合和高可用观测不作为本特性的验收条件。
 - **SC-015**: 文件观测测试 MUST 验证日志/Trace 可写、敏感字段脱敏、轮转/保留边界和进程重启后的可读取快照；Langfuse 集成测试 MUST 使用 OTLP/HTTP stub 验证 headers、service/resource 属性和 Trace/LLM/Tool span 到达，不使用真实凭证。
 - **SC-016**: 提供 MySQL 密码环境变量时 `docker compose config` MUST 校验成功；Compose 启动的 MySQL MUST 达到健康状态，OTel Collector MUST 可通过 observability profile 单独启停，Go 服务由宿主机启动；默认 Go 单测不得要求 Docker daemon。
+- **SC-017**: 租约合同测试 MUST 证明两个执行者竞争同一 Run 时仅一个 claim 成功、过期后可接管；恢复测试 MUST 证明重复 Resume 不重放已完成副作用、in-flight unknown outcome 不自动重试、terminal event 唯一且序号连续，并覆盖 Plan/checkpoint/event 部分失败后的可恢复路径。
 
 ## Assumptions
 

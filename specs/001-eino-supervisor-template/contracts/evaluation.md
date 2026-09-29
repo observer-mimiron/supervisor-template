@@ -53,7 +53,7 @@ Case 的 impact_tags 是人工维护的业务/架构范围标签。PR 的风险�
 
 ## Runner and Evidence
 
-The local Runner drives the existing routes: `POST /api/chat`, `POST /api/runs/{run_id}/approval`, `/resume`, `/cancel`. It parses the existing SSE envelope and records `run_id`, `case_id`, `case_version`, `code_version`, `trace_id`, event order, Tool calls, approval/recovery/cancel/terminal status, timeout/retry, fake write count and cleanup result. A single Case deadline covers setup plus all follow-up requests. Only safe pre-call failures may consume retry budget; unknown outcomes are not retried.
+The local Runner drives the existing routes: `POST /api/chat`, `POST /api/runs/{run_id}/approval`, `/resume`, `/cancel`. It parses the existing SSE envelope and records `run_id`, `case_id`, `case_version`, `code_version`, `trace_id`, non-empty unique event IDs, event order, Tool calls, approval/recovery/cancel/terminal status, timeout/retry, fake write count and cleanup result. A single Case deadline covers setup plus all follow-up requests. Only safe pre-call failures may consume retry budget; unknown outcomes are not retried. Evidence integrity rejects missing or mismatched Case/Run association and rejects events without a non-empty ID or matching RunID.
 
 Runner exit codes: `0` all deterministic hard checks pass; `1` business execution or hard assertion failed; `2` invalid dataset/configuration or Runner setup failure. A Runner failure cannot be reported as an evaluator pass.
 

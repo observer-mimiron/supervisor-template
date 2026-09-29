@@ -79,3 +79,41 @@ go run ./cmd/server/ -f ./config.example.toml -fake
 CI 必须运行静态依赖检查、Go 测试、评测测试和本地 Case Runner；任何硬门禁失败均非零退出。需要在代码托管平台配置 Required Checks 和高风险变更的 Required Reviewers 后，才能称为合并阻断门禁。LLM Judge 只告警，不决定退出码。
 
 Langfuse OTLP 关联是可选项，不参与默认 Case 通过判定；在线 LLM Judge、Apifox、真实 MySQL/GORM 和 CRM 写入需要额外合同或独立 Spec/Plan。
+
+## Durable execution validation
+
+Phase 18 的必需验证不需要外部模型或 Docker，使用 memory/file fake。当前单实例目标不要求
+MySQL 多实例恢复；仅在部署明确启用 MySQL lease 时，才设置 DSN 并补跑可选 adapter/integration test。
+
+```bash
+go test ./internal/infrastructure/persistence/... ./internal/infrastructure/checkpoint/... ./internal/infrastructure/eventbus/...
+go test ./internal/application/run -run 'Lease|Resume|Reconciliation|Projection|Terminal|Sequence' -count=1
+go test -race ./internal/application/run ./internal/infrastructure/persistence/... ./internal/infrastructure/eventbus/...
+```
+
+合同测试证明：两个 owner 竞争同一 Run 只有一个 claim 成功；过期后另一个 owner 可以
+接管；重复 Resume 不重复调用 fake side effect；in-flight unknown outcome 不自动重试；
+事件序号连续且终态唯一；Plan、Checkpoint、EventStore 任一部分写入失败后状态仍明确、
+可由下一次 Resume 修复或进入 reconciliation。memory/file 合同已在当前工作树运行。真实 MySQL
+lease 集成测试只在提供 `MYSQL_TEST_DSN` 时运行；当前未提供 DSN 会跳过该可选测试，不会阻断
+memory/file 的单实例验证。
+
+完整门禁仍为：
+
+```bash
+go test ./...
+go test -race ./...
+go build ./cmd/server/
+go vet ./...
+go run ./cmd/archcheck
+go run ./cmd/eval \
+  -dataset ./eval/datasets/synthetic-operations-v1.json \
+  -report ./tmp/eval-report-enterprise.json \
+  -code-version enterprise-execution-v1 \
+  -config ./config.example.toml
+git diff --check
+```
+
+评测报告必须打印 Case 总数、passed/failed、每个 Case 的 terminal 和 fake write count；
+不要把编译或 adapter 合同测试写成真实 MySQL 恢复语义已验证。当前未验证真实 MySQL 多实例恢复，
+但这不是当前单实例目标的门禁。

@@ -48,3 +48,41 @@ Soft review records carry rubric version, score, risk, finding, evidence referen
 ## PR Risk Review
 
 A PR review record declares risk (low/medium/high), affected tags, reviewer, decision, rationale, and timestamp. High risk includes changes to Policy Gate, identity/resource authorization, approval, idempotency, state ownership, persistence, external side effects, or dependency direction. High-risk changes run the full dataset and require approval independent of evaluator/Judge output. Missing or uncertain classification is high risk. Failure calibration and PR approval are separate records and decisions.
+
+## Durable execution entities
+
+Durable execution extends the existing model; it does not introduce a generic `state` owner.
+
+| Entity | Authoritative owner | Required fields | Invariants |
+|---|---|---|---|
+| Run snapshot | Application/Manager through `Repository` | `run_id`, `plan_id`, ordered `steps`, run status, terminal code, error class, `updated_at` | Step count/order and succeeded steps cannot be rolled back; a terminal run is immutable except projection repair |
+| Plan step | `ExecutionPlan` | `step_id`, status, attempt, attempt status, idempotency key, result digest/content, error class, `updated_at` | One step is executed at a time; `running` after an owner crash is not assumed safe to retry |
+| Run lease | `RunLeaseStore` adapter | `run_id`, random `owner_token`, `expires_at` | At most one non-expired owner; only current owner may release; expiry permits a new owner |
+| Checkpoint | `CheckpointStore` | `run_id`, `plan_id`, monotonic version, completed step IDs, resume token | Version is contiguous per run; it is a cursor, not a second state machine |
+| Run event | `EventStore` | `event_id`, `run_id`, sequence, type, safe data | Sequence starts at 1 and is contiguous; one public terminal event; duplicate event ID is idempotent |
+
+### State transitions
+
+```text
+pending -> running -> waiting_approval -> running
+                 -> waiting_reconciliation
+                 -> completed | failed | canceled
+```
+
+`waiting_reconciliation` is terminal for automatic execution but not a guessed failure: a human or
+explicit reconciliation operation must resolve the external outcome. A lease expiry during
+`running` may only make the next owner enter this state. Repeated Resume on a terminal Plan reads
+the existing events and repairs missing projections without re-running a Tool.
+
+### Partial-write recovery matrix
+
+| Failure point | Durable fact | Resume behavior | Guarantee |
+|---|---|---|---|
+| Before Tool call | Plan/checkpoint still pending or running | Reclaim lease and execute only if no in-flight marker exists | At-least-once application step; no external call happened is only known before call |
+| Tool started, result unknown | Step/Run marked `waiting_reconciliation` when possible | Return `RUN_OUTCOME_UNKNOWN`; never auto-retry | No duplicate side effect, manual reconciliation required |
+| Plan saved, checkpoint failed | Plan is authoritative; cursor may lag | Rebuild checkpoint from Plan under lease | Recoverable projection, not atomic across stores |
+| Checkpoint saved, event append failed | Cursor exists; public projection may lag | Re-emit missing progress/terminal events with sequence checks | Recoverable projection, not exactly-once |
+| Event append succeeded, later state write failed | Event is evidence only; Plan remains owner | Load Plan, avoid treating event as authority; repair projection or surface storage error | No event-driven state mutation |
+
+The planned contract tests inject each boundary and assert an explicit recoverable status. They must
+not use event presence alone to infer that a side effect completed.

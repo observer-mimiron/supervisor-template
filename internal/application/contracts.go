@@ -127,6 +127,20 @@ type EventStore interface {
 	Events(string) []agent.RunEvent
 }
 
+// RunLease serializes one Run's execution and durable state mutations.
+type RunLease struct {
+	RunID      string
+	OwnerToken string
+	ExpiresAt  time.Time
+}
+
+// RunLeaseStore atomically claims, verifies and releases a Run lease.
+type RunLeaseStore interface {
+	Claim(context.Context, RunLease, time.Time) (bool, error)
+	Owns(context.Context, RunLease, time.Time) (bool, error)
+	Release(context.Context, RunLease) error
+}
+
 // ContextEventStore 是可选的 context-aware 事件扩展；旧事件存储仍可实现基础合同。
 type ContextEventStore interface {
 	AppendContext(context.Context, agent.RunEvent) (agent.RunEvent, error)
@@ -288,6 +302,7 @@ type Dependencies struct {
 	Repository    Repository
 	Checkpoint    CheckpointStore
 	EventBus      EventStore
+	Leases        RunLeaseStore
 	Supervisor    DecisionProvider
 	Policy        PolicyEvaluator
 	RunAuth       RunAuthorizer
@@ -309,7 +324,7 @@ type HealthService struct {
 // Healthy 判断应用依赖是否完整。
 func (s HealthService) Healthy() bool {
 	return s.Dependencies.Repository != nil && s.Dependencies.Checkpoint != nil &&
-		s.Dependencies.EventBus != nil && s.Dependencies.Supervisor != nil &&
+		s.Dependencies.EventBus != nil && s.Dependencies.Leases != nil && s.Dependencies.Supervisor != nil &&
 		s.Dependencies.Policy != nil && s.Dependencies.RunAuth != nil &&
 		(s.Dependencies.Runner != nil || s.Dependencies.Tools != nil)
 }

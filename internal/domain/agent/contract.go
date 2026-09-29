@@ -75,6 +75,8 @@ const (
 	ErrorUnauthenticated   ErrorCode = "UNAUTHENTICATED"
 	ErrorAccessDenied      ErrorCode = "ACCESS_DENIED"
 	ErrorOutcomeUnknown    ErrorCode = "RUN_OUTCOME_UNKNOWN"
+	ErrorRunBusy           ErrorCode = "RUN_BUSY"
+	ErrorLeaseLost         ErrorCode = "RUN_LEASE_LOST"
 )
 
 // SupervisorDecision 是模型或 Supervisor 提出的候选路由，不代表授权结果。
@@ -121,6 +123,8 @@ type PlanStep struct {
 	ResultDigest   string
 	ResultContent  string
 	AttemptStatus  string
+	ErrorClass     ErrorClass
+	UpdatedAt      time.Time
 }
 
 // ExecutionPlan 是 Manager 所有的有界执行计划。
@@ -132,6 +136,8 @@ type ExecutionPlan struct {
 	Deadline     time.Time
 	Status       RunStatus
 	TerminalCode ErrorCode
+	ErrorClass   ErrorClass
+	UpdatedAt    time.Time
 }
 
 // NewExecutionPlan 创建一个状态为 pending 的有界计划。
@@ -224,7 +230,7 @@ func validStepTransition(current, next StepStatus) bool {
 	case StepPending:
 		return next == StepRunning || next == StepWaitingApproval || next == StepCanceled
 	case StepRunning:
-		return next == StepSucceeded || next == StepFailed || next == StepCanceled || next == StepWaitingReconciliation
+		return next == StepPending || next == StepSucceeded || next == StepFailed || next == StepCanceled || next == StepWaitingReconciliation
 	case StepWaitingApproval:
 		return next == StepRunning || next == StepFailed || next == StepCanceled
 	case StepWaitingReconciliation:

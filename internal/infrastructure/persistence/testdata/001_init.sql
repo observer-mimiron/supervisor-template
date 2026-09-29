@@ -34,3 +34,11 @@ CREATE TABLE IF NOT EXISTS orders (
     CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users (id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_orders_product FOREIGN KEY (product_id) REFERENCES products (id) ON UPDATE CASCADE ON DELETE RESTRICT
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS run_leases (
+    run_id VARCHAR(128) NOT NULL,
+    owner_token VARCHAR(64) NOT NULL,
+    expires_at DATETIME(3) NOT NULL,
+    PRIMARY KEY (run_id),
+    KEY idx_run_leases_expires_at (expires_at)
+) ENGINE=InnoDB;

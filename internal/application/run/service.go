@@ -6,6 +6,7 @@ package run
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -46,6 +47,7 @@ type Service struct {
 	active    map[string]*runControl
 	sequence  atomic.Uint64
 	now       func() time.Time
+	lease     application.RunLease
 }
 
 type runControl struct {
@@ -58,8 +60,83 @@ func NewService(deps application.Dependencies) *Service {
 	return &Service{deps: deps, approvals: make(map[string]*approval.Request), active: make(map[string]*runControl), now: time.Now}
 }
 
+// claimLease acquires the cross-process Run lease when one is configured.
+// Legacy unit tests may omit the optional port; those tests retain the original
+// in-process mutex semantics, while composition always supplies a durable store.
+func (s *Service) claimLease(ctx context.Context, runID string) (application.RunLease, error) {
+	if s.deps.Leases == nil {
+		return application.RunLease{}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return application.RunLease{}, err
+	}
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		return application.RunLease{}, fmt.Errorf("生成执行租约 owner token 失败: %w", err)
+	}
+	ownerToken := hex.EncodeToString(token)
+	ttl := s.budget().Timeout
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	if ttl < 5*time.Second {
+		ttl = 5 * time.Second
+	}
+	// The lease is deliberately longer than one bounded run. Renewal for
+	// unbounded work is deferred; bounded execution avoids a background goroutine.
+	lease := application.RunLease{RunID: runID, OwnerToken: ownerToken, ExpiresAt: s.now().Add(2 * ttl)}
+	claimed, err := s.deps.Leases.Claim(ctx, lease, s.now())
+	if err != nil {
+		return application.RunLease{}, err
+	}
+	if !claimed {
+		return application.RunLease{}, &Error{Code: agent.ErrorRunBusy, Message: "执行正在由其他 owner 处理"}
+	}
+	s.lease = lease
+	return lease, nil
+}
+
+func (s *Service) ensureLease(ctx context.Context, lease application.RunLease) error {
+	if s.deps.Leases == nil || lease.RunID == "" {
+		return nil
+	}
+	owned, err := s.deps.Leases.Owns(ctx, lease, s.now())
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return &Error{Code: agent.ErrorLeaseLost, Message: "执行租约已失效"}
+	}
+	return nil
+}
+
+func (s *Service) releaseLease(ctx context.Context, lease application.RunLease) error {
+	if s.deps.Leases == nil || lease.RunID == "" {
+		return nil
+	}
+	return s.deps.Leases.Release(context.WithoutCancel(ctx), lease)
+}
+
+// savePlanLocked is the single application boundary for durable Plan writes.
+// It stamps update times without moving state ownership into persistence.
+func (s *Service) savePlanLocked(plan agent.ExecutionPlan) error {
+	if err := s.ensureLease(s.operationContext(), s.lease); err != nil {
+		return err
+	}
+	now := s.now()
+	plan.UpdatedAt = now
+	for index := range plan.Steps {
+		plan.Steps[index].UpdatedAt = now
+	}
+	return s.deps.Repository.SavePlan(plan)
+}
+
+func (s *Service) ensureCurrentLease() error {
+	return s.ensureLease(s.operationContext(), s.lease)
+}
+
 // Start 接收一次用户请求，返回稳定 run_id；重复提交同一 run_id 只重放原事件。
-func (s *Service) Start(ctx context.Context, request conversation.ExecutionRequest) (string, error) {
+func (s *Service) Start(ctx context.Context, request conversation.ExecutionRequest) (runID string, retErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ctx = ctx
@@ -74,6 +151,16 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 	if request.ConversationID == "" || strings.TrimSpace(request.Message) == "" {
 		return request.RunID, &Error{Code: "INVALID_REQUEST", Message: "会话和消息不能为空"}
 	}
+	lease, err := s.claimLease(ctx, request.RunID)
+	if err != nil {
+		return request.RunID, err
+	}
+	defer func() {
+		if releaseErr := s.releaseLease(ctx, lease); releaseErr != nil && retErr == nil {
+			retErr = &Error{Code: agent.ErrorLeaseLost, Message: "执行租约释放失败", cause: releaseErr}
+		}
+		s.lease = application.RunLease{}
+	}()
 	if existing := s.deps.EventBus.Events(request.RunID); len(existing) > 0 {
 		stored, ok, err := s.loadRequest(request.RunID)
 		if err != nil {
@@ -94,6 +181,9 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 		request.RequestedAt = s.now()
 	}
 	budget := s.budget()
+	if err := s.ensureLease(ctx, lease); err != nil {
+		return request.RunID, err
+	}
 	if err := s.deps.Repository.SaveRequest(request); err != nil {
 		return request.RunID, err
 	}
@@ -161,7 +251,7 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 		_ = s.failLocked(request.RunID, "INTERNAL_ERROR", "无法创建执行计划")
 		return request.RunID, err
 	}
-	if err := s.deps.Repository.SavePlan(plan); err != nil {
+	if err := s.savePlanLocked(plan); err != nil {
 		return request.RunID, err
 	}
 	planData := map[string]string{"plan_id": plan.PlanID, "step_count": fmt.Sprintf("%d", len(steps))}
@@ -178,7 +268,7 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 		if err := plan.TransitionStep(step.StepID, agent.StepWaitingApproval); err != nil {
 			return request.RunID, err
 		}
-		if err := s.deps.Repository.SavePlan(plan); err != nil {
+		if err := s.savePlanLocked(plan); err != nil {
 			return request.RunID, err
 		}
 		approvalRecord := approval.Request{
@@ -189,6 +279,9 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 			Risk:          string(agent.RiskSideEffect),
 			Status:        approval.Pending,
 		}
+		if err := s.ensureCurrentLease(); err != nil {
+			return request.RunID, err
+		}
 		if err := s.deps.Repository.SaveApproval(approvalRecord); err != nil {
 			return request.RunID, err
 		}
@@ -196,7 +289,12 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 		if err := s.saveCheckpointLocked(plan, 1); err != nil {
 			return request.RunID, err
 		}
-		if err := s.emitLocked(request.RunID, agent.ApprovalRequired, map[string]string{"approval_id": request.RunID + ":approval"}); err != nil {
+		if err := s.emitLocked(request.RunID, agent.ApprovalRequired, map[string]string{
+			"approval_id": request.RunID + ":approval",
+			"step_id":     step.StepID,
+			"worker_id":   step.WorkerID,
+			"tool_id":     step.ToolID,
+		}); err != nil {
 			return request.RunID, err
 		}
 		return request.RunID, nil
@@ -208,7 +306,7 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 }
 
 // Approve 写入认证主体的审批决定；批准只解除门控，实际 Tool 调用由 Resume 推进。
-func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, decision string) error {
+func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, decision string) (retErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ctx = ctx
@@ -216,6 +314,16 @@ func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, 
 	if err := s.authorizeRun(ctx, subject, runID); err != nil {
 		return err
 	}
+	lease, err := s.claimLease(ctx, runID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := s.releaseLease(ctx, lease); releaseErr != nil && retErr == nil {
+			retErr = &Error{Code: agent.ErrorLeaseLost, Message: "执行租约释放失败", cause: releaseErr}
+		}
+		s.lease = application.RunLease{}
+	}()
 	request, ok, err := s.approvalLocked(runID)
 	if err != nil {
 		return err
@@ -235,6 +343,9 @@ func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, 
 	}
 	if err := request.Decide(status, subject.SubjectID, s.now()); err != nil {
 		return &Error{Code: "INVALID_REQUEST", Message: err.Error()}
+	}
+	if err := s.ensureCurrentLease(); err != nil {
+		return err
 	}
 	if err := s.deps.Repository.SaveApproval(*request); err != nil {
 		return err
@@ -258,7 +369,7 @@ func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, 
 }
 
 // Cancel 将主体拥有的未终态执行标记为 canceled，并持久化唯一取消事件。
-func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID string) error {
+func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID string) (retErr error) {
 	if err := s.authorizeRun(ctx, subject, runID); err != nil {
 		return err
 	}
@@ -276,6 +387,16 @@ func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID st
 	defer s.mu.Unlock()
 	s.ctx = ctx
 	defer func() { s.ctx = nil }()
+	lease, err := s.claimLease(ctx, runID)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if releaseErr := s.releaseLease(ctx, lease); releaseErr != nil && retErr == nil {
+			retErr = &Error{Code: agent.ErrorLeaseLost, Message: "执行租约释放失败", cause: releaseErr}
+		}
+		s.lease = application.RunLease{}
+	}()
 	plan, ok, err := s.loadPlan(runID)
 	if err != nil {
 		return err
@@ -290,7 +411,12 @@ func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID st
 		return err
 	} else if ok && request.Status == approval.Pending {
 		_ = request.Decide(approval.Expired, "", s.now())
-		_ = s.deps.Repository.SaveApproval(*request)
+		if err := s.ensureCurrentLease(); err != nil {
+			return err
+		}
+		if err := s.deps.Repository.SaveApproval(*request); err != nil {
+			return err
+		}
 	}
 	if err := s.terminateLocked(&plan, agent.RunCanceled, agent.ErrorCanceled, "执行已取消"); err != nil {
 		if _, ok := err.(*Error); !ok {
@@ -302,7 +428,7 @@ func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID st
 }
 
 // Resume 从 checkpoint 恢复主体拥有的执行；终态 run 只返回原事件，不再次调用 Tool。
-func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID string) ([]agent.RunEvent, error) {
+func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID string) (events []agent.RunEvent, retErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ctx = ctx
@@ -310,6 +436,16 @@ func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID st
 	if err := s.authorizeRun(ctx, subject, runID); err != nil {
 		return nil, err
 	}
+	lease, err := s.claimLease(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if releaseErr := s.releaseLease(ctx, lease); releaseErr != nil && retErr == nil {
+			retErr = &Error{Code: agent.ErrorLeaseLost, Message: "执行租约释放失败", cause: releaseErr}
+		}
+		s.lease = application.RunLease{}
+	}()
 	plan, ok, err := s.loadPlan(runID)
 	if err != nil {
 		return nil, err
@@ -321,6 +457,9 @@ func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID st
 		return nil, err
 	} else if found && snapshot.PlanID != plan.PlanID {
 		return nil, &Error{Code: "RUN_NOT_RESUMABLE", Message: "checkpoint 与执行计划不匹配"}
+	}
+	if err := s.reconcileExpiredInFlightLocked(&plan); err != nil {
+		return s.deps.EventBus.Events(runID), err
 	}
 	if agent.IsTerminal(plan.Status) {
 		if err := s.repairStepProjectionsLocked(plan); err != nil {
@@ -421,7 +560,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		// bounded Worker/Tool deadline before the side effect starts.
 		if plan.Deadline.IsZero() || !s.now().Before(plan.Deadline) {
 			plan.Deadline = s.now().Add(budget.Timeout)
-			if err := s.deps.Repository.SavePlan(plan); err != nil {
+			if err := s.savePlanLocked(plan); err != nil {
 				return err
 			}
 		}
@@ -452,6 +591,8 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if err := plan.TransitionStep(step.StepID, agent.StepRunning); err != nil {
 		return err
 	}
+	plan.ErrorClass = ""
+	step.ErrorClass = ""
 	attemptLimit := budget.MaxToolCalls
 	if budget.CostBudget < attemptLimit {
 		attemptLimit = budget.CostBudget
@@ -462,8 +603,11 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		return s.terminateLocked(&plan, agent.RunFailed, agent.ErrorBudgetExceeded, "能力调用超过预算")
 	}
 	step.Attempts++
-	step.AttemptStatus = "running"
-	if err := s.deps.Repository.SavePlan(plan); err != nil {
+	// Persist a pre-call marker before the checkpoint. If the process exits here,
+	// recovery can safely put the step back to pending because no Runner call was
+	// started yet.
+	step.AttemptStatus = "prepared"
+	if err := s.savePlanLocked(plan); err != nil {
 		return err
 	}
 	version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
@@ -484,7 +628,16 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "running", "step_id": step.StepID}); err != nil {
 		return err
 	}
-	if err := s.emitLocked(plan.RunID, agent.ToolCall, map[string]string{"worker_id": step.WorkerID, "tool_id": step.ToolID}); err != nil {
+	if err := s.emitLocked(plan.RunID, agent.ToolCall, map[string]string{
+		"step_id": step.StepID, "worker_id": step.WorkerID, "tool_id": step.ToolID,
+	}); err != nil {
+		return err
+	}
+	// The external call is now the next operation. Persisting this marker just
+	// before Runner.Run lets recovery distinguish a pre-call crash (prepared)
+	// from an in-flight call whose outcome must be reconciled.
+	step.AttemptStatus = "running"
+	if err := s.savePlanLocked(plan); err != nil {
 		return err
 	}
 	toolCtx := ctx
@@ -550,7 +703,9 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 			if policy.Classify(err, application.PhasePreCall) == application.ErrorPreCallFailure && policy.Decide(application.ErrorPreCallFailure, step.Attempts, budget.MaxRetries) == application.Retry && totalAttempts < attemptLimit {
 				s.observe(toolCtx, application.RuntimeObservation{RunID: plan.RunID, WorkerID: step.WorkerID, ToolID: step.ToolID, Phase: "retry", RetryDecision: string(application.Retry), Attempt: step.Attempts, Duration: time.Since(workerStarted)})
 				step.AttemptStatus = "failed_pre_call"
-				if err := s.deps.Repository.SavePlan(plan); err != nil {
+				step.ErrorClass = agent.ClassPreCallFailure
+				plan.ErrorClass = agent.ClassPreCallFailure
+				if err := s.savePlanLocked(plan); err != nil {
 					return err
 				}
 				if err := s.emitLocked(plan.RunID, agent.Progress, map[string]string{"status": "retrying", "step_id": step.StepID}); err != nil {
@@ -560,7 +715,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 				// can safely return to pending for the next bounded attempt.
 				step.Status = agent.StepPending
 				plan.Status = agent.RunPending
-				if err := s.deps.Repository.SavePlan(plan); err != nil {
+				if err := s.savePlanLocked(plan); err != nil {
 					return err
 				}
 				return s.executeLocked(ctx, plan)
@@ -590,10 +745,12 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		return err
 	}
 	step.AttemptStatus = "succeeded"
+	step.ErrorClass = ""
+	plan.ErrorClass = ""
 	step.ResultContent = result
 	digest := sha256.Sum256([]byte(result))
 	step.ResultDigest = hex.EncodeToString(digest[:])
-	if err := s.deps.Repository.SavePlan(plan); err != nil {
+	if err := s.savePlanLocked(plan); err != nil {
 		return s.markOutcomeUnknownLocked(&plan, step)
 	}
 	version, err = nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
@@ -620,7 +777,7 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		plan.Steps[next].Input = map[string]string{"message": boundedHandoff(result)}
 	}
 	plan.Status = agent.RunPending
-	if err := s.deps.Repository.SavePlan(plan); err != nil {
+	if err := s.savePlanLocked(plan); err != nil {
 		return err
 	}
 	return s.executeLocked(ctx, plan)
@@ -670,8 +827,10 @@ func (s *Service) markOutcomeUnknownLocked(plan *agent.ExecutionPlan, step *agen
 		plan.Status = agent.RunWaitingReconciliation
 	}
 	step.AttemptStatus = "unknown"
+	step.ErrorClass = agent.ClassUnknownOutcome
+	plan.ErrorClass = agent.ClassUnknownOutcome
 	var persistErr error
-	if err := s.deps.Repository.SavePlan(*plan); err != nil {
+	if err := s.savePlanLocked(*plan); err != nil {
 		persistErr = errors.Join(persistErr, fmt.Errorf("保存未知结果计划失败: %w", err))
 	}
 	if version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID); err == nil {
@@ -706,6 +865,72 @@ func (s *Service) repairTerminalEventLocked(plan agent.ExecutionPlan) error {
 		return s.emitLocked(plan.RunID, agent.Canceled, map[string]string{"code": string(plan.TerminalCode), "message": "执行已取消"})
 	}
 	return s.emitLocked(plan.RunID, agent.Failed, map[string]string{"code": string(plan.TerminalCode), "message": "执行失败"})
+}
+
+// reconcileExpiredInFlightLocked converts an in-flight snapshot left by a
+// crashed owner into an explicit manual-reconciliation state. A new owner only
+// reaches this method after claiming the Run lease, so it never retries an
+// external call whose outcome is unknown.
+func (s *Service) reconcileExpiredInFlightLocked(plan *agent.ExecutionPlan) error {
+	if plan == nil || agent.IsTerminal(plan.Status) {
+		return nil
+	}
+	changed := false
+	unknown := false
+	for index := range plan.Steps {
+		step := &plan.Steps[index]
+		if step.Status != agent.StepRunning {
+			continue
+		}
+		if step.AttemptStatus == "prepared" {
+			if err := plan.TransitionStep(step.StepID, agent.StepPending); err != nil {
+				return err
+			}
+			if step.Attempts > 0 {
+				step.Attempts--
+			}
+			step.AttemptStatus = "recovered_pre_call"
+			step.ErrorClass = ""
+			changed = true
+			continue
+		}
+		if err := plan.TransitionStep(step.StepID, agent.StepWaitingReconciliation); err != nil {
+			return err
+		}
+		step.AttemptStatus = "unknown"
+		step.ErrorClass = agent.ClassUnknownOutcome
+		unknown = true
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if !unknown {
+		plan.Status = agent.RunPending
+		plan.ErrorClass = ""
+		if err := s.savePlanLocked(*plan); err != nil {
+			return err
+		}
+		version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
+		if err != nil {
+			return err
+		}
+		return s.saveCheckpointLocked(*plan, version)
+	}
+	plan.ErrorClass = agent.ClassUnknownOutcome
+	if err := s.savePlanLocked(*plan); err != nil {
+		return err
+	}
+	version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
+	if err != nil {
+		return err
+	}
+	if err := s.saveCheckpointLocked(*plan, version); err != nil {
+		return err
+	}
+	return s.emitLocked(plan.RunID, agent.ReconciliationRequired, map[string]string{
+		"code": string(agent.ErrorOutcomeUnknown), "message": "进程恢复时发现未确认的外部执行结果",
+	})
 }
 
 func (s *Service) repairStepProjectionsLocked(plan agent.ExecutionPlan) error {
@@ -830,6 +1055,9 @@ func (s *Service) authorize(ctx context.Context, subject, owner identity.Subject
 
 // saveCheckpointLocked 保存恢复所需的最小快照。
 func (s *Service) saveCheckpointLocked(plan agent.ExecutionPlan, version int64, runnerToken ...string) error {
+	if err := s.ensureCurrentLease(); err != nil {
+		return err
+	}
 	status := plan.Status
 	returnValue := agent.Checkpoint{RunID: plan.RunID, PlanID: plan.PlanID, Status: status, Version: version, SavedAt: s.now()}
 	if previous, found, err := s.loadCheckpoint(plan.RunID); err != nil {
@@ -869,6 +1097,8 @@ func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunSta
 	s.ctx = context.WithoutCancel(s.operationContext())
 	defer func() { s.ctx = previousContext }()
 	terminalStepID := ""
+	class := errorClassForCode(code)
+	plan.ErrorClass = class
 	if !agent.IsTerminal(plan.Status) && len(plan.Steps) > 0 {
 		stepIndex := nextStepIndex(*plan)
 		if stepIndex < 0 {
@@ -885,11 +1115,12 @@ func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunSta
 				return err
 			}
 		}
+		step.ErrorClass = class
 	}
 	if err := plan.MarkTerminal(status, code); err != nil {
 		return err
 	}
-	if err := s.deps.Repository.SavePlan(*plan); err != nil {
+	if err := s.savePlanLocked(*plan); err != nil {
 		return err
 	}
 	version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
@@ -913,8 +1144,28 @@ func (s *Service) terminateLocked(plan *agent.ExecutionPlan, status agent.RunSta
 	return &Error{Code: code, Message: message}
 }
 
+func errorClassForCode(code agent.ErrorCode) agent.ErrorClass {
+	switch code {
+	case agent.ErrorCanceled:
+		return agent.ClassCanceled
+	case agent.ErrorToolTimeout:
+		return agent.ClassTimeout
+	case agent.ErrorInvalidOutput:
+		return agent.ClassInvalidOutput
+	case agent.ErrorPolicyDenied, agent.ErrorUnknownCapability:
+		return agent.ClassPolicyDenied
+	case agent.ErrorOutcomeUnknown:
+		return agent.ClassUnknownOutcome
+	default:
+		return agent.ClassInternal
+	}
+}
+
 // emitLocked 按已持久化事件生成稳定 ID；事件顺序由 EventStore 再次校验。
 func (s *Service) emitLocked(runID string, eventType agent.EventType, data map[string]string) error {
+	if err := s.ensureCurrentLease(); err != nil {
+		return err
+	}
 	ctx := s.operationContext()
 	events := s.deps.EventBus.Events(runID)
 	if store, ok := s.deps.EventBus.(application.ContextEventStore); ok {

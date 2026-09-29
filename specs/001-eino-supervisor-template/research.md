@@ -54,7 +54,7 @@ Run four independent hard evaluators: business correctness, architecture boundar
 
 ## Decision: Make static architecture checks and risk review explicit gates
 
-The local plan will select and pin a deterministic Go package-dependency checker only after verifying that it expresses the repository's documented layer rules. Its command, version, and failure behavior then become a required CI check alongside Go tests and the local Case Runner. The current checkout has no CI workflow or checker configuration, so this is planned work rather than an existing capability.
+The current checkout uses the repository-local `cmd/archcheck` command and CI workflow as the deterministic package-dependency check. Its output and failure behavior are verified alongside Go tests and the local Case Runner. Hosted Required Checks/Reviewers remain a repository-settings concern, not an implied property of the workflow file.
 
 PR risk is human-declared and defaults to high when uncertain. Changes touching Policy, identity/resource authorization, approval, idempotency, state ownership, persistence, side effects, or dependency direction run the full dataset and require a recorded human approval. This approval is separate from failure calibration and from the advisory LLM Judge.
 
@@ -71,3 +71,29 @@ Define JSON contracts for Judge output and human disposition, but keep the defau
 ## Deferred boundaries
 
 Do not add Apifox import, real CRM, MySQL/GORM SQL evidence, full Langfuse Dataset/Evaluator/Score, online LLM Judge, or cross-process exactly-once in this plan. Each needs a separate, code-backed contract and validation path.
+
+## Durable execution research (2026-09-29)
+
+本阶段只使用本地参考源码和本地 Go module cache；Temporal Go SDK 与 LangGraph 上游源码不在
+当前工作区，因此它们只作为待验证的概念基线，不能作为本地实现证据。完整记录见
+[`docs/research-durable-execution.md`](../../docs/research-durable-execution.md)。
+
+| 参考 | 具体能力 | 当前选择 | 状态 |
+|---|---|---|---|
+| Eino module cache `v0.9.12` (`compose/checkpoint.go`, `internal/core/interrupt.go`, `adk/runner.go`) | 窄 CheckPointStore、checkpoint ID 和 Runner Resume | 保持 Eino 在 infrastructure；Application 独立保存 `ExecutionPlan` | `partial` |
+| Coze Studio `fefb05ff` (`execute_history_store.go`) | 条件状态更新先认领中断执行 | 引入最小 Run lease 的原子 claim/check/release，不搬平台工作流 | `partial` |
+| ecommerce sample `0c31ebb` (`app/main.py`, order repository/models) | thread/checkpoint 恢复和唯一幂等键 | 保留当前 PlanStep 幂等键与 checkpoint identity，不引入 Python/SQLAlchemy | `partial` |
+| Temporal/LangGraph 上游 | 持久工作流、队列、pending writes 等成熟语义 | 本轮不抓取、不复制；只在边界中记录差距 | `deferred` |
+
+### Durable design decisions
+
+- `ExecutionPlan` 是 Run/Step 状态唯一 owner；Repository 负责快照，Checkpoint 是恢复游标，
+  EventStore 是可重放投影。
+- Run lease 使用随机 owner token 和 expiry。Memory 仅用于单进程合同测试；File 以每 Run
+  的 OS `flock` 协调本地进程；MySQL 复用现有 GORM adapter 的条件 upsert。释放必须校验
+  owner，过期租约才允许接管。
+- 接管一个持久化为 `running` 的步骤时进入 `waiting_reconciliation`，不得把崩溃解释成
+  Tool 未执行；unknown outcome 永不自动重试。
+- Plan、Checkpoint 和 EventStore 不在同一事务时，只保证单存储原子性和 Resume 可修复的
+  at-least-once 投影；不能宣称跨存储 exactly-once。事务 outbox、队列、lease renewal、
+  跨主机共享文件和自动 reconciliation 均 `deferred`。

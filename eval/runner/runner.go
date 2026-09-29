@@ -23,32 +23,33 @@ import (
 )
 
 const DefaultToken = "demo-token"
-const EvaluatorVersion = "1"
+const EvaluatorVersion = "2"
 
 type Evidence struct {
-	RunID               string              `json:"run_id"`
-	CaseID              string              `json:"case_id"`
-	CaseVersion         string              `json:"case_version"`
-	CodeVersion         string              `json:"code_version"`
-	EvaluatorVersion    string              `json:"evaluator_version"`
-	Fixture             string              `json:"fixture,omitempty"`
-	Subject             string              `json:"subject,omitempty"`
-	TraceID             string              `json:"trace_id,omitempty"`
-	Events              []Event             `json:"events"`
-	Terminal            string              `json:"terminal,omitempty"`
-	Error               string              `json:"error,omitempty"`
-	HTTPStatus          []int               `json:"http_statuses"`
-	ElapsedMS           int64               `json:"elapsed_ms"`
-	Retries             int                 `json:"retries"`
-	Result              map[string]any      `json:"result,omitempty"`
-	FailedStepID        string              `json:"failed_step_id,omitempty"`
-	VerdictDigest       string              `json:"verdict_digest,omitempty"`
-	RepeatChecked       bool                `json:"repeat_checked,omitempty"`
-	RepeatVerdictStable bool                `json:"repeat_verdict_stable,omitempty"`
-	FakeWriteCount      int                 `json:"fake_write_count"`
-	CleanupResult       string              `json:"cleanup_result,omitempty"`
-	RegisteredTools     []string            `json:"registered_tools,omitempty"`
-	WorkerToolAllowList map[string][]string `json:"worker_tool_allow_list,omitempty"`
+	RunID                  string                              `json:"run_id"`
+	CaseID                 string                              `json:"case_id"`
+	CaseVersion            string                              `json:"case_version"`
+	CodeVersion            string                              `json:"code_version"`
+	EvaluatorVersion       string                              `json:"evaluator_version"`
+	Fixture                string                              `json:"fixture,omitempty"`
+	Subject                string                              `json:"subject,omitempty"`
+	TraceID                string                              `json:"trace_id,omitempty"`
+	Events                 []Event                             `json:"events"`
+	Terminal               string                              `json:"terminal,omitempty"`
+	Error                  string                              `json:"error,omitempty"`
+	HTTPStatus             []int                               `json:"http_statuses"`
+	ElapsedMS              int64                               `json:"elapsed_ms"`
+	Retries                int                                 `json:"retries"`
+	Result                 map[string]any                      `json:"result,omitempty"`
+	FailedStepID           string                              `json:"failed_step_id,omitempty"`
+	VerdictDigest          string                              `json:"verdict_digest,omitempty"`
+	RepeatChecked          bool                                `json:"repeat_checked,omitempty"`
+	RepeatVerdictStable    bool                                `json:"repeat_verdict_stable,omitempty"`
+	FakeWriteCount         int                                 `json:"fake_write_count"`
+	CleanupResult          string                              `json:"cleanup_result,omitempty"`
+	RegisteredTools        []string                            `json:"registered_tools,omitempty"`
+	WorkerToolAllowList    map[string][]string                 `json:"worker_tool_allow_list,omitempty"`
+	RegisteredToolMetadata map[string]composition.ToolMetadata `json:"registered_tool_metadata,omitempty"`
 }
 
 type Event struct {
@@ -125,6 +126,7 @@ func (r *Runner) RunCase(ctx context.Context, item eval.Case) (evidence Evidence
 	startWriteCount := writeCount()
 	evidence.RegisteredTools = append([]string(nil), snapshot.ToolIDs...)
 	evidence.WorkerToolAllowList = snapshot.WorkerTools
+	evidence.RegisteredToolMetadata = snapshot.ToolMetadata
 	defer func() {
 		evidence.FakeWriteCount = writeCount() - startWriteCount
 		if cleanupErr := closeServer(); cleanupErr != nil {

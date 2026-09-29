@@ -15,6 +15,10 @@ var allowedCategories = map[string]bool{"positive": true, "negative": true, "bou
 var allowedRisks = map[string]bool{"low": true, "medium": true, "high": true}
 var allowedActions = map[string]bool{"chat": true, "approval": true, "resume": true, "cancel": true, "repeat": true}
 var allowedEvaluators = map[string]bool{"business_correctness@1": true, "architecture_boundary@1": true, "side_effect_safety@1": true, "stability@1": true}
+var requiredEvaluators = []string{"business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"}
+var allowedEvidence = map[string]bool{"events": true, "tool_calls": true, "run_state": true, "trace_correlation": true, "approval": true, "cleanup": true, "http_statuses": true, "sequence": true}
+var allowedTerminals = map[string]bool{"completed": true, "failed": true, "canceled": true, "request_error": true}
+var allowedEventTypes = map[string]bool{"started": true, "decision": true, "plan": true, "progress": true, "tool_call": true, "approval_required": true, "reconciliation_required": true, "text": true, "completed": true, "failed": true, "canceled": true}
 
 // Load decodes a dataset and rejects duplicate object keys and unknown fields.
 func Load(path string) (Dataset, error) {
@@ -67,9 +71,36 @@ func validateDataset(dataset Dataset) error {
 		if item.RetryBudget < 0 || item.IdempotencyKey == "" || item.CleanupPolicy != "isolated_run" {
 			return fmt.Errorf("case %q has invalid retry, idempotency or cleanup policy", item.ID)
 		}
-		if len(item.RequestSteps) == 0 || item.ExpectedResults.Terminal == "" {
+		if len(item.RequestSteps) == 0 || !allowedTerminals[item.ExpectedResults.Terminal] {
 			return fmt.Errorf("case %q requires request steps and terminal expectation", item.ID)
 		}
+		if item.ExpectedResults.Terminal != "request_error" && len(item.ExpectedResults.EventTypes) == 0 {
+			return fmt.Errorf("case %q requires expected event types", item.ID)
+		}
+		for _, eventType := range item.ExpectedResults.EventTypes {
+			if !allowedEventTypes[eventType] {
+				return fmt.Errorf("case %q references invalid event type %q", item.ID, eventType)
+			}
+		}
+		if len(item.EvidenceRequirements) == 0 || len(item.EvaluatorRules) == 0 {
+			return fmt.Errorf("case %q requires evidence requirements and evaluator rules", item.ID)
+		}
+		if item.ForbiddenEffects.MaxWrites < 0 {
+			return fmt.Errorf("case %q max_writes cannot be negative", item.ID)
+		}
+		seenEvidence := map[string]bool{}
+		for _, requirement := range item.EvidenceRequirements {
+			if !allowedEvidence[requirement] || seenEvidence[requirement] {
+				return fmt.Errorf("case %q references invalid or duplicate evidence requirement %q", item.ID, requirement)
+			}
+			seenEvidence[requirement] = true
+		}
+		for _, requirement := range RequiredEvidence(item) {
+			if !seenEvidence[requirement] {
+				return fmt.Errorf("case %q must declare required evidence %q", item.ID, requirement)
+			}
+		}
+		seenRules := map[string]bool{}
 		for _, step := range item.RequestSteps {
 			if !allowedActions[step.Action] {
 				return fmt.Errorf("case %q has unsupported action %q", item.ID, step.Action)
@@ -79,8 +110,14 @@ func validateDataset(dataset Dataset) error {
 			}
 		}
 		for _, rule := range item.EvaluatorRules {
-			if !allowedEvaluators[rule] {
+			if !allowedEvaluators[rule] || seenRules[rule] {
 				return fmt.Errorf("case %q references unknown evaluator %q", item.ID, rule)
+			}
+			seenRules[rule] = true
+		}
+		for _, rule := range requiredEvaluators {
+			if !seenRules[rule] {
+				return fmt.Errorf("case %q must declare evaluator %q", item.ID, rule)
 			}
 		}
 	}

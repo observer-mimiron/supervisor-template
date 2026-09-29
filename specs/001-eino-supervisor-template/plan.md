@@ -20,6 +20,26 @@
 **Constraints**: Case 预期和 evaluator 规则只读加载；AI 生成的请求步骤不能改验收标准；副作用仍必须经过 Policy Gate、Approval、Idempotency、Tool、Audit/Event；观测、Judge 和报告失败不得改变业务终态；合并门禁只接受确定性结果，Judge 不阻断；高风险人工审批是额外放行条件
 **Scale/Scope**: 首批至少四类 Case（正向、负向、边界、多样性），覆盖单 Worker、两步串行、审批触达、授权/注册/输入拒绝、取消/超时/恢复和幂等重复；不实现通用 DAG、跨进程 exactly-once 或平台化 Dataset 服务
 
+### Phase 18 technical context
+
+**Durable state**: `ExecutionPlan` in `Repository` is the Run/Step authority; `CheckpointStore`
+is a monotonic recovery cursor and `EventStore` is an ordered projection. Existing memory/file
+implementations remain available; file writes are per-store atomic JSON replacement, not a shared
+transaction.
+
+**Lease**: Application owns `RunLeaseStore` (`run_id`, random `owner_token`, `expires_at`,
+claim/check/release). Memory is process-local; File uses a per-Run OS lock plus an atomically
+replaced lease record; MySQL reuses the existing GORM adapter. No queue, outbox, DAG or new ORM.
+
+**Recovery boundary**: An expired lease may be reclaimed. A persisted `running` step is treated as
+`waiting_reconciliation`, never as a safe-to-retry Tool call. Plan/checkpoint/event partial failure
+is repaired by Resume from the Plan and is explicitly not cross-store exactly-once.
+
+**Evidence status**: event ordering, unique terminal projection, file atomic replacement and the
+unknown-outcome branch are `implemented`; lease adapters and Application integration are `partial`
+until contract tests pass; distributed workflow service, lease renewal and external exactly-once
+are `deferred`.
+
 ## Constitution Check
 
 **Initial gate: PASS**
@@ -154,3 +174,72 @@ specs/001-eino-supervisor-template/contracts/evaluation.md
 | 本项目架构文档/宪法 | 目录责任、依赖方向、启动期 fail-closed 原则 | `documented` | `implemented`: `cmd/archcheck` 和 CI workflow 已接入；托管平台 Required Checks/Reviewers 需另行配置 |
 
 参考项目实现状态以 2026-09-28 本地源码为准；本项目评测 Runner、Evaluator 和报告的完成证据见 `tasks.md` Phase 13-15 与 `PROGRESS.md`，不把父项目的在线 Langfuse client 或 Score API 能力算作本项目实现。
+
+## Phase 18: Durable execution closure (2026-09-29)
+
+### Scope and decisions
+
+- Reuse Application/Manager `ExecutionPlan` as the authoritative Run/Step snapshot. Persist status, attempt, terminal code/classification and update time through the existing Repository; keep Checkpoint as a recovery cursor and EventStore as a replayable projection.
+- Add an Application-owned Run lease contract with random owner token, expiry, claim, ownership check and release. File mode uses a per-run OS file lock around an atomically replaced lease record; configured MySQL reuses the existing GORM adapter and a conditional upsert. Memory mode remains process-local. MySQL is optional and does not replace the memory/file Runtime Repository, Checkpoint or EventStore.
+- Serialize one Run's Start/Approve/Resume/Cancel mutations with that lease. When an expired lease is reclaimed and the persisted step is `running`, move it to `waiting_reconciliation`; never infer that the external call did not happen.
+- Preserve separate Repository, Checkpoint and EventStore writes. Resume repairs stale checkpoint and missing event projections from the Plan. This is recoverable at-least-once projection, not a cross-store transaction or exactly-once guarantee.
+- Keep the current Tool idempotency key on the persisted PlanStep. Do not add an outbox, generic workflow engine, queue, DAG, database abstraction, or new runtime dependency.
+
+### Reference comparison
+
+| Local source | Relevant pattern | Decision/status |
+|---|---|---|
+| CloudWeGo Eino module cache `v0.9.12`, `compose/checkpoint.go`, `internal/core/interrupt.go`, `adk/runner.go` | CheckPointStore is a narrow byte store; Runner Resume loads by checkpoint ID. | `partial`: keep Eino behind WorkerRunner and persist the application-owned Plan separately. |
+| Coze Studio local checkout `fefb05ff`, `domain/workflow/internal/repo/execute_history_store.go` | Conditional status update claims an interrupted execution before resume. | `implemented`: the principle is wired as the application-owned Run lease; platform workflow/queue behavior is not copied. |
+| Local LangGraph-based ecommerce sample `0c31ebb`, `app/main.py`, `app/order/repository.py`, `app/order/models.py` | SQLite checkpointer resumes by thread ID; database idempotency key is unique and checked in the order transaction. | `partial`: reuse checkpoint identity/idempotency principles, not its Python graph or SQLAlchemy stack. |
+| Temporal Go SDK and LangGraph upstream source | Not present in local checkouts/module cache. | `deferred`: this task is constrained to local references; no claim is made about their current implementation details. |
+
+### Boundaries and verification
+
+- File repository/checkpoint/event writes remain atomic per file, not a single transaction. The file lease coordinates cooperating application instances on a local filesystem; it is not a distributed lock for arbitrary network filesystems.
+- MySQL lease uses the existing GORM adapter and requires the included `run_leases` schema. Adapter code and schema are present, but real MySQL multi-instance behavior has not been verified. Multi-instance deployment is not a current requirement, so that integration run is `deferred`, not a blocker for the single-instance memory/file target.
+- `go test`, race, build, vet, archcheck and the existing eight local evaluation Cases remain required. Production HA, lease renewal for unbounded work, cross-host shared-file semantics, transactional outbox, exactly-once external side effects and automatic reconciliation are deferred.
+
+### Implementation sequence
+
+1. **Contract and snapshot fields**: keep `ExecutionPlan` as the owner; persist `ErrorClass` and
+   `UpdatedAt` for the plan and each step. Add only the `RunLeaseStore` application port already
+   planned; do not expose file locks or GORM types above infrastructure.
+2. **Adapters**: require shared-contract tests for memory and local file `flock`; file tests use two
+   store instances over one directory. Keep the GORM/MySQL conditional-claim integration test
+   optional and run it only when a deployment actually selects MySQL leases.
+3. **Application integration**: claim a lease for Start/Approve/Resume/Cancel and release it on
+   every exit path. Check ownership around state writes. On expired takeover, convert durable
+   `running` work to reconciliation before any Worker call.
+4. **Projection repair**: make Resume derive missing progress/text/terminal projections from Plan;
+   event append must remain idempotent and sequence-checked. A projection error is recoverable
+   infrastructure failure, not a successful terminal result.
+5. **Failure-injection contracts**: inject failures after Tool start, after Plan save, after
+   Checkpoint save and after Event append. Assert no duplicate side effect, no second terminal,
+   monotonic event sequence and explicit next action (`resume`, reconciliation or fail).
+6. **Regression gate**: run the existing eight evaluation Cases plus the full Go/race/build/vet/
+   archcheck/diff command set. Report MySQL and multi-process evidence separately from memory/file
+   contract evidence.
+
+### Post-design constitution gate: PASS with explicit limits
+
+- Domain remains free of HTTP, Eino, GORM and file-lock types; `RunLease` is an application port and
+  adapters remain under `internal/infrastructure`.
+- `ExecutionPlan` remains the only Run/Step owner. Checkpoint and EventStore are projections/cursors,
+  not alternate state machines. Supervisor/Worker/Tool still cannot choose authority or terminal state.
+- Lease serialization narrows concurrent mutation but does not change Policy Gate, approval,
+  idempotency or Final Guard responsibilities. No new top-level directory, queue, DAG or ORM is added.
+- The design claims per-store atomicity and recoverable projection only. It explicitly does not claim
+  cross-store transactions, external exactly-once, cross-host file locking or automatic resolution of
+  unknown external outcomes.
+
+### Planned artifacts and evidence labels
+
+- `docs/research-durable-execution.md`: local reference comparison and implemented/partial/deferred
+  boundary labels (`implemented` for memory/file lease and application recovery contracts; `partial`
+  for cross-store atomicity and production MySQL; `deferred` for service-side workflow guarantees).
+- [`data-model.md`](./data-model.md): Run/Step/Lease/Checkpoint/Event fields and partial-write matrix.
+- [`contracts/runtime-foundation.md`](./contracts/runtime-foundation.md): lease and recovery contracts.
+- [`quickstart.md`](./quickstart.md): contract and required gate commands; Phase 18 memory/file
+  commands have been run. Real MySQL multi-instance recovery remains optional/deferred because it
+  is not part of the current single-instance target.

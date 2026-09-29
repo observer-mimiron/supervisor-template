@@ -1,21 +1,21 @@
 # 当前实现盘点与成熟项目对比
 
-**盘点日期：** 2026-09-28
-**范围：** 当前工作树、项目进度与设计文档，以及 Eino、Coze Studio、Dify、LangGraph 的公开资料。
+**盘点日期：** 2026-09-29
+**范围：** 当前工作树、项目进度与设计文档，以及本地 Eino 模块缓存、Coze Studio 和电商 Agent 参考源码。
 **状态标签：** `implemented` 有本地代码和验证证据；`partial` 有部分实现但闭环或生产语义未证实；`deferred` 明确暂缓；`not_applicable` 不属于本模板目标。
 
 ## 结论
 
 这是一个以权限边界、运行状态、可恢复合同和本地确定性评测为核心的 Go/Eino Agent 脚手架，不是一个成熟的 Agent 平台。它已经完成了“请求进入、候选路由、确定性授权、有限计划、工具执行、审批/取消/恢复、事件投影、Case Runner、四维报告”的本地闭环；成熟项目领先之处主要不在分层，而在产品面、执行器丰富度、生产存储/身份、工作流编辑与发布、长期知识/记忆、运维和在线评测承载。
 
-下一步优先不是添加 DAG、长期记忆或更多 Agent 抽象，而是让已完成的本地评测、架构检查、失败回流和边界状态具备可复核入口；随后再根据真实部署目标选择身份和持久化方案。`business_correctness` 对 `expected_results.result` 的字段级断言仍是明确的 partial 项。
+下一步优先不是添加 DAG、长期记忆或更多 Agent 抽象，而是让已完成的本地评测、架构检查、失败回流和边界状态具备可复核入口；随后再根据真实部署目标选择身份和持久化方案。`business_correctness` 已对合成 Case 的 `expected_results.result` 做字段级安全断言，但真实业务质量基准仍是 partial。
 
 ## 证据边界
 
 - 本地事实以 `PROGRESS.md`、当前代码、`specs/001-eino-supervisor-template/tasks.md` 和合同测试为准。计划文档、配置字段或接口存在本身不等于功能闭环。
 - 新鲜验证：`go test ./...`、`go test -race ./...`、`go build ./cmd/server/`、`go vet ./...`、`go run ./cmd/archcheck`、`git diff --check`，以及高风险 8 Case、低风险标签选择 3 Case 均通过；这些是当前工作树的本地证据。
-- `examplebusiness/fixture.go` 已接入 `user_query`、`user_summary_query` 和模拟触达的本地 fake 链路，说明 Dataset 可从 HTTP/SSE 入口跑通；这不等于真实 CRM/营销业务，也不等于字段级业务质量基准已完成。
-- 外部调研使用 Agent Reach 的 Exa 搜索和 GitHub API。Exa 返回过官方文档摘要，但 `agent-reach doctor --json` 无输出超时；GitHub API 可用。调研结果以官方仓库、官方文档和固定 commit 为依据，不以星数作为质量结论。
+- `examplebusiness/fixture.go` 已接入 `user_query`、`user_summary_query` 和模拟触达的本地 fake 链路，说明 Dataset 可从 HTTP/SSE 入口跑通；这不等于真实 CRM/营销业务或真实业务质量基准。
+- 本轮没有联网调研。Temporal Go SDK 和 LangGraph 上游源码在当前工作区不可用，因此只记录为概念基线并标记 `deferred`，不把它们的实现语义当作本项目证据。
 
 ## 当前能力清单
 
@@ -28,16 +28,16 @@
 | 审批与副作用 | side-effect 在批准前阻止执行；批准身份取认证主体；幂等键和审计事件；fake 模拟写入 | `implemented` | 没有真实运营写入；审批流程和业务数据闭环有限；`internal/application/run/`、`internal/infrastructure/tool/` |
 | Tool | 注册表、Worker allow-list、Pool 并发/租约/deadline、输入输出合同校验、错误分类；fake、固定 endpoint HTTP GET、受控 MCP | `implemented` | MCP 只调用启动时 allow-list，不动态发现、不支持真实写入 Tool；HTTP Tool 是固定只读 GET |
 | 认证/授权 | Bearer token SHA-256 环境变量验证；映射 tenant/subject；run 重放、审批、resume、cancel 做 owner 校验；和模型动作 Policy 分离 | `partial` | 静态凭证、静态主体；无 OIDC/JWT、RBAC/ABAC、组织/资源目录和 token 生命周期 |
-| 状态/存储 | 内存与版本化文件 Repository、checkpoint、event store；文件使用哈希路径、临时文件和 rename；新进程可读取快照 | `partial` | 文件方案定位单实例；不支持多主写入、数据库 HA、共享租约或跨进程 exactly-once；Eino 应用级跨进程 resume 未证实 |
-| 恢复/可靠性 | checkpoint 前置于 Runner；未知结果进入 reconciliation 而不重试；修复缺失投影；重复 resume/审批/cancel 保护终态；context 协作取消 | `partial` | 外部调用后提交前崩溃仍可能结果未知；不强杀忽略 context 的进程；Eino 跨进程恢复未验证 |
+| 状态/存储 | 内存与版本化文件 Repository、checkpoint、event store；Run lease 支持 owner token、expiry、claim/release；可选 MySQL 复用现有 GORM lease adapter | `partial` | 当前单实例目标由 memory/file 满足；MySQL GORM 用于示例订单 Tool 和可选 lease，不是完整 Agent Runtime 状态后端。真实 MySQL 多实例恢复未验证且当前不需要；Plan/Checkpoint/EventStore 仍是独立写边界，不支持跨存储事务或 exactly-once |
+| 恢复/可靠性 | checkpoint 前置于 Runner；`prepared` 可回到 pending；过期接管把 in-flight `running` 转为 reconciliation；未知结果不重试；缺失投影可修复 | `implemented` | 本地 memory/file 合同和 Service 测试已覆盖；真实外部副作用、强杀进程和 Eino 跨进程恢复仍未验证 |
 | Memory | 按 tenant/subject/conversation 隔离的短期 Memory，TTL/大小/敏感字段/召回限制，内存和文件实现 | `partial` | 不等于知识库或长期记忆；没有 embedding、向量检索、摘要、事实更新/遗忘策略 |
 | 事件/API | `/healthz`、`/api/chat`、approval、resume、cancel；认证 Bearer；SSE 有序事件、唯一终态、公开数据脱敏 | `implemented` | 当前是小型服务 API，不是完整 SDK、控制面或运营工作台 |
 | 配置/扩展 | TOML → 环境覆盖 → Validate；启动编译不可变 RuntimeCatalog；集中业务描述；注册缺失/allow-list 错误启动失败 | `implemented` | 配置只能选择已编译实现；没有热加载、动态插件或面向用户的 Agent Builder |
-| 观测/评测 | 可选 OTLP HTTP trace/metric、Eino callback；本地 HTTP/SSE Runner、四维确定性 Evaluator、JSON/JSONL 报告和失败回流合同 | `partial` | 本地 Case 闭环已实现；Langfuse 在线 Dataset/Score/Feedback 同步、Judge 门禁、告警/SLO/运营看板仍未实现 |
+| 观测/评测 | 可选 OTLP HTTP trace/metric、Eino callback；本地 HTTP/SSE Runner、四维硬 Evaluator、强制 evidence matrix、事件完整性/Policy 顺序校验、Tool 风险元数据、JSON/JSONL 报告和失败回流合同 | `partial` | 本地 Case 与通用反绕过合同已实现；在线 Dataset/Score/Feedback 同步、Judge 门禁、告警/SLO/运营看板仍未实现 |
 | 日志 | `log/slog` JSON 日志、低基数字段上下文、敏感关键字/内部路径脱敏和有界文件 writer | `partial` | 运行期诊断字段、指标覆盖和生产级日志平台仍有限；不把本地 logger 误称为完整运维体系 |
 | Trace / Metric | OTLP HTTP exporter、HTTP trace context、Eino ChatModel/Tool callback、事件计数器、token usage、错误 span 状态 | `partial` | Case 关联和 context-aware EventStore 已有合同；生产 collector、完整延迟/错误/重试/审批/预算指标、多实例证据仍有限 |
 | 错误处理 | 应用层统一错误分类、pre-call 重试、timeout/cancel、unknown outcome reconciliation；HTTP 稳定错误码和 SSE failed 事件 | `implemented` | `internal/application/run/error_policy.go`、`internal/application/run/service.go`、HTTP `statusFor`；仍缺统一错误日志字段、外部错误码/重试次数观测、panic/启动/关闭错误的结构化处理 |
-| 示例业务 | 注册了分析、总结、模拟触达；固定合成客户 fixture 已接入本地 fake Tool 和评测 Case | `partial` | 没有真实运营系统或外部写入；`expected_results.result` 字段级 evaluator 仍待 T050 |
+| 示例业务 | 注册了分析、总结、模拟触达；固定合成客户 fixture 已接入本地 fake Tool 和评测 Case | `partial` | 没有真实运营系统或外部写入；字段断言只证明合成 fixture，不证明真实业务质量 |
 | 部署/平台 | Go 服务入口、DeepSeek 默认样例配置、健康检查；本地 fake 可显式选择 | `partial` | 未提供完整生产部署拓扑、数据库/队列、密钥管理、水平扩展、备份迁移和发布回滚链路 |
 
 ## 架构差异
@@ -103,7 +103,7 @@ HTTP 层再把这些分类映射为稳定状态码和公开错误消息，SSE �
 如果按“先补基础再扩业务”排序：
 
 1. **P0：保持本地评测闭环可复现**：固定 Dataset/Runner/Evaluator/报告命令，并在 `PROGRESS.md` 记录实际证据。
-2. **P1：补业务结果字段断言**：完成 T050，解析安全的 `count`、`customer_ids`、`spend_365d_total`，不把原始 Tool payload 写入报告。
+2. **P1：扩展业务结果字段断言**：当前已完成合成 fixture 的 `count`、`customer_ids`、`spend_365d_total` 安全解析；真实业务字段和质量基准仍需按业务合同补充。
 3. **P1：补错误诊断字段和指标**：保留现有错误分类，只增加结构化日志、延迟/错误/重试/审批/恢复指标。
 4. **P2：按真实部署需求补身份、存储和观测**：没有多实例或合规指标前，不提前引入新的平台组件。
 
@@ -157,7 +157,7 @@ HTTP/RPC middleware
 
 T035–T049 已在当前工作树完成并有本地证据：版本化 Dataset、HTTP/SSE Runner、四维确定性报告、失败回流合同、架构检查、CI 接线和可选观测关联。本地验证使用 `README.md` 和 `docs/evaluation-method.md` 中的固定命令，不把历史计划或外部服务初始化当成评测结果。
 
-**当前门槛：** 高风险全量 Case 和低风险标签选择都必须可重跑并得到结构化报告；报告必须保留 Case/run/evaluator/evidence 关联。`expected_results.result` 的字段级断言仍由 T050 单独收口。
+**当前门槛：** 高风险全量 Case 和低风险标签选择都必须可重跑并得到结构化报告；报告必须保留 Case/run/evaluator/evidence 关联。合成 Case 的 `expected_results.result` 已有字段级断言，真实业务质量仍不在本轮范围内。
 
 ### P1：按目标部署补生产身份与真实 Eino 恢复证据
 
@@ -177,17 +177,16 @@ T035–T049 已在当前工作树完成并有本地证据：版本化 Dataset、
 
 ## 参考来源与本地对比代码
 
-以下仓库在 2026-09-25 通过 GitHub API 查看仓库元数据，固定到当时获取的 commit；官方文档会持续变化，真正据此实现前应重新检查版本与语义。
+以下只列本轮实际读取的本地参考；未列出的上游项目没有被当作实现证据。
 
 | 项目 | 固定 commit | 来源与对比入口 |
 | --- | --- | --- |
-| Eino | `ba04fde8641057055c358d7ab5d3015a9ba825e1` | [GitHub](https://github.com/cloudwego/eino)；[ADK overview](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/)；[Runner/Checkpoint](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_extension/)；[Supervisor](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_implementation/supervisor/) |
-| Coze Studio | `fefb05ff27be1da939612fbf9faf5db62583b8ae` | [GitHub](https://github.com/coze-dev/coze-studio)；[架构文档](https://github.com/coze-dev/coze-studio/wiki/7.-Development-Standards)；[Workflow 节点](https://github.com/coze-dev/coze-studio/wiki/11.-Add-new-workflow-node-types-(backend)) |
-| Dify | `d86435ee1e69b5badef832baf785863ea99bfbd7` | [GitHub README](https://github.com/langgenius/dify)；[自托管文档](https://docs.dify.ai/getting-started/install-self-hosted) |
-| LangGraph | `7daa3ab49d678a5da75edb08baa87db4a2be52c3` | [GitHub](https://github.com/langchain-ai/langgraph)；[Persistence](https://docs.langchain.com/oss/python/langgraph/persistence)；[Checkpointers](https://docs.langchain.com/oss/python/langgraph/checkpointers) |
-| Temporal Go SDK | `626130f1fd9de50cfd90b884a3fb796504f22dc1` | 现有 [组件参考矩阵](./component-reference-map.md) 固定来源；[GitHub](https://github.com/temporalio/sdk-go) |
+| CloudWeGo Eino | Go module cache `v0.9.12`；`compose/checkpoint.go`、`adk/runner.go` | Runner checkpoint/resume 原语；本项目只把它作为 infrastructure 适配器 |
+| Coze Studio | `../agent-architecture-references/coze-studio/`，本地 commit `fefb05ff`；execute history repository | 条件认领和恢复状态；本项目实现最小 Run lease |
+| ecommerce-customer-service-agent | `../agent-architecture-references/ecommerce-customer-service-agent/`，本地 commit `0c31ebb`；order repository/models | checkpoint identity 和幂等键；不引入其 Python 运行时 |
+| Temporal Go SDK / LangGraph | 当前工作区没有源码或模块缓存 | 只作为待验证概念基线，状态为 `deferred` |
 
-本地浅克隆/对比目录：`../agent-architecture-references/comparison/`（Eino、Dify、LangGraph）和现有 `../agent-architecture-references/coze-studio/`。comparison 下三个仓库使用 `--depth 1 --no-checkout`，保留 Git tree/commit 供核验但不展开大仓库工作树；Coze Studio 和电商 Agent 参考仓库已由项目预先保存。本次不复制源码进入当前仓库，也不引入运行依赖。
+本次不复制参考源码进入当前仓库，也不引入运行依赖。
 
 ## 建议的“已完成”定义
 

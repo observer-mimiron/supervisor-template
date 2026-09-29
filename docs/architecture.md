@@ -52,6 +52,7 @@
 | 权限和路由 | Supervisor 输出先过结构解析、注册表、Worker allow-list 和 Policy Gate | `internal/domain/agent`、composition/run 合同测试 |
 | 副作用 | `Approval -> Idempotency -> Tool -> Audit Event`，批准前不执行 | `boundary-approved-outreach`、`negative-reject-outreach` |
 | 状态 owner | Application/Manager 推进 `ExecutionPlan` 和终态，Worker 只能返回受控结果 | `internal/application/run/service.go`、唯一终态测试 |
+| Run lease | `Start`、`Approve`、`Resume`、`Cancel` 先 claim owner token；写入前后检查 ownership，过期接管后不重跑 in-flight step | `RunLeaseStore`、`internal/infrastructure/persistence/lease_test.go`、`durable_execution_test.go` |
 | 未知结果 | 外部调用开始但提交未确认时进入 `waiting_reconciliation`，Resume 不自动重试 | `OutcomeUnknownError`、`TestUnknownRunnerOutcomeWaitsForReconciliationAndNeverRetries` |
 | 失败半径 | 每个 run 有步骤、调用、重试、成本、deadline 和取消边界；Runner 不持有全局状态锁 | `ExecutionBudget`、Runner/取消合同测试 |
 | 观测故障 | exporter、日志或 snapshot 失败只产生 degraded signal，不改变业务状态 | `internal/infrastructure/observability` 合同测试 |
@@ -90,7 +91,7 @@
 
 ## v1 实现边界
 
-v1 的默认存储仍是内存 Repository/checkpoint，示例业务 Tool 使用 fake 实现；服务样例配置默认使用 DeepSeek，离线合同测试和 Case Runner 显式选择 fake Supervisor。M4 已补充可选的文件持久化实现，支持单实例写入和跨进程读取恢复快照，但不承诺数据库级高可用、多主并发或跨存储 exactly-once。执行结果在外部调用后、提交前发生进程中断时必须视为未知，恢复返回 `RUN_OUTCOME_UNKNOWN`，禁止自动重试。M3 已补充固定地址 HTTP 只读 Tool 和 OpenTelemetry 适配，M4 还补充了受 allow-list、超时、大小限制和错误分类约束的 MCP Tool 适配。第一条可运行验收链路固定为：
+v1 同时保留内存和文件 Repository/checkpoint/event store；示例业务 Tool 使用 fake 实现，服务样例配置默认使用 DeepSeek，离线合同测试和 Case Runner 显式选择 fake Supervisor。文件存储支持单实例写入、跨进程读取和本地 Run lease 接管。可选 MySQL 示例使用现有 GORM adapter 提供订单 Tool 和 Run lease；Agent Runtime 的 Repository、Checkpoint、EventStore 仍由 memory/file 提供，不是完整 MySQL 状态后端。当前部署目标不要求多实例 MySQL 恢复，因此真实 MySQL lease 集成验证 deferred，不作为本地门禁；不承诺数据库级高可用、多主并发或跨存储 exactly-once。执行结果在外部调用后、提交前发生进程中断时必须视为未知，恢复返回 `RUN_OUTCOME_UNKNOWN`，禁止自动重试；Worker 前的 `prepared` 快照可安全回到 pending。第一条可运行验收链路固定为：
 
 `Gin -> Application -> Eino Supervisor -> fake Worker -> fake Tool -> RunEvent -> SSE`
 
