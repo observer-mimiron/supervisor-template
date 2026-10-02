@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
-	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/identity"
 )
 
@@ -26,8 +25,15 @@ type StaticBearerAuthenticator struct {
 	credentials []bearerCredential
 }
 
+// Credential is the infrastructure-local form of one static bearer mapping.
+type Credential struct {
+	TokenSHA256Env string
+	TenantID       string
+	SubjectID      string
+}
+
 // NewStaticBearerAuthenticator 创建不持有原始 token 的静态 Bearer 认证器。
-func NewStaticBearerAuthenticator(credentials []config.BearerCredential) *StaticBearerAuthenticator {
+func NewStaticBearerAuthenticator(credentials []Credential) *StaticBearerAuthenticator {
 	configured := make([]bearerCredential, 0, len(credentials))
 	for _, credential := range credentials {
 		configured = append(configured, bearerCredential{

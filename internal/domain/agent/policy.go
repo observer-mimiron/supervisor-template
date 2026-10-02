@@ -13,31 +13,33 @@ import (
 
 // PolicyGate 将候选决策限制到已注册 Worker 和 allow-listed Tool。
 type PolicyGate struct {
-	Workers map[string]operation.WorkerContract
-	Tools   map[string]domaintool.Contract
+	workers map[string]operation.WorkerContract
+	tools   map[string]domaintool.Contract
 }
 
 // NewPolicyGate 创建不可改变权限上限的确定性策略门控。
 func NewPolicyGate(workers []operation.WorkerContract, tools []domaintool.Contract) *PolicyGate {
 	workerMap := make(map[string]operation.WorkerContract, len(workers))
 	for _, worker := range workers {
+		worker.AllowedTools = append([]string(nil), worker.AllowedTools...)
 		workerMap[worker.WorkerID] = worker
 	}
 	toolMap := make(map[string]domaintool.Contract, len(tools))
 	for _, tool := range tools {
+		tool.RequiredInputs = append([]string(nil), tool.RequiredInputs...)
 		toolMap[tool.ToolID] = tool
 	}
-	return &PolicyGate{Workers: workerMap, Tools: toolMap}
+	return &PolicyGate{workers: workerMap, tools: toolMap}
 }
 
 // Evaluate 把候选路由转换成允许执行的 ApprovedRoute。
 func (p *PolicyGate) Evaluate(decision SupervisorDecision) (ApprovedRoute, error) {
-	worker, ok := p.Workers[decision.WorkerID]
+	worker, ok := p.workers[decision.WorkerID]
 	if !ok {
 		return ApprovedRoute{}, fmt.Errorf("Worker %q 未注册: %w", decision.WorkerID, errors.New(string(ErrorUnknownCapability)))
 	}
 	toolID := decision.Arguments["tool_id"]
-	tool, ok := p.Tools[toolID]
+	tool, ok := p.tools[toolID]
 	if !ok {
 		return ApprovedRoute{}, fmt.Errorf("Tool %q 未注册: %w", toolID, errors.New(string(ErrorUnknownCapability)))
 	}

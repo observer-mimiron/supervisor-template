@@ -1,0 +1,25 @@
+{
+  "name": "feature-acceptance-template",
+  "version": "1",
+  "description": "Copy and review this local template when adding a project feature. The example Case is a passing read-only baseline: replace the id, goal, request message, and expected result with the reviewed feature behavior.",
+  "cases": [
+    {
+      "id": "feature-example",
+      "version": "1",
+      "category": "positive",
+      "risk_level": "low",
+      "impact_tags": ["feature"],
+      "business_goal": "Replace with the observable feature goal.",
+      "preconditions": {"fixture": "synthetic_audience_v1", "subject": "demo-user"},
+      "request_steps": [{"action": "chat", "message": "分析沉睡客户", "conversation_id": "feature-example"}],
+      "expected_results": {"terminal": "completed", "event_types": ["started", "decision", "plan", "progress", "tool_call", "progress", "text", "completed"], "result": {"count": 4}},
+      "forbidden_side_effects": {"tool_ids": ["simulated_outreach"], "max_writes": 0},
+      "evidence_requirements": ["events", "tool_calls", "run_state", "trace_correlation", "cleanup", "http_statuses", "sequence"],
+      "evaluator_rules": ["business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"],
+      "timeout": "5s",
+      "retry_budget": 1,
+      "idempotency_key": "feature-example",
+      "cleanup_policy": "isolated_run"
+    }
+  ]
+}

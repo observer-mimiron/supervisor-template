@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 )
 
 func TestPoolBoundsConcurrentCallsAndRejectsExhaustionBeforeInvocation(t *testing.T) {
@@ -124,7 +126,7 @@ func TestPoolRejectsUnknownToolAndLeaseMismatchBeforeInvocation(t *testing.T) {
 }
 
 func TestRegistryRejectsUnknownAndInvalidInputsBeforePoolInvocation(t *testing.T) {
-	registry, err := NewRegistry("", "", 0)
+	registry, err := NewRegistry(0, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,8 +135,5 @@ func TestRegistryRejectsUnknownAndInvalidInputsBeforePoolInvocation(t *testing.T
 	}
 	if _, err := registry.Execute(context.Background(), "user_query", nil, ""); err == nil {
 		t.Fatal("invalid input was accepted")
-	}
-	if got := registry.OutreachCount(); got != 0 {
-		t.Fatalf("rejected calls caused %d side effects", got)
 	}
 }

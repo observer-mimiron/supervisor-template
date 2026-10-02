@@ -9,27 +9,18 @@ import (
 	"time"
 
 	domaintool "github.com/observer-mimiron/supervisor-template/internal/domain/tool"
-	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
-	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/mcp"
-	mysqlinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/persistence/mysql"
 )
 
 // Registry 是按实现 ID 分派的 ToolExecutor。
 type Registry struct {
-	fake      *FakeRegistry
 	pool      *Pool
 	contracts map[string]domaintool.Contract
 }
 
 type toolHandler func(context.Context, map[string]string, string) (string, error)
 
-// NewRegistry 创建默认 fake 或配置指定的 HTTP 只读 Tool 注册表。
-func NewRegistry(userQueryImplementation, endpoint string, timeout time.Duration) (*Registry, error) {
-	return NewRegistryWithMCP(userQueryImplementation, endpoint, timeout, nil, "")
-}
-
-// NewRegistryWithMCP 创建 Tool 注册表，并可选接入已通过 allow-list 的 MCP client。
-func NewRegistryWithMCP(userQueryImplementation, endpoint string, timeout time.Duration, mcpClient *mcp.Client, mcpServer string, mysqlAdapters ...*mysqlinfra.Adapter) (*Registry, error) {
+// NewRegistry creates a generic registry from composition-provided contracts.
+func NewRegistry(timeout time.Duration, contracts []domaintool.Contract) (*Registry, error) {
 	poolTimeout := timeout
 	if poolTimeout <= 0 {
 		poolTimeout = 30 * time.Second
@@ -39,74 +30,17 @@ func NewRegistryWithMCP(userQueryImplementation, endpoint string, timeout time.D
 		return nil, err
 	}
 	registry := &Registry{
-		fake:      NewFakeRegistry(),
 		pool:      pool,
 		contracts: make(map[string]domaintool.Contract),
 	}
-	contracts := ContractsFor(userQueryImplementation)
-	var mysqlAdapter *mysqlinfra.Adapter
-	if len(mysqlAdapters) > 0 {
-		mysqlAdapter = mysqlAdapters[0]
-		if mysqlAdapter != nil {
-			contracts = ContractsForMySQL(userQueryImplementation)
+	for _, contract := range CloneContracts(contracts) {
+		if contract.ToolID == "" {
+			return nil, fmt.Errorf("Tool 合同缺少 id")
 		}
-	}
-	for _, contract := range contracts {
-		contract.RequiredInputs = append([]string(nil), contract.RequiredInputs...)
+		if _, exists := registry.contracts[contract.ToolID]; exists {
+			return nil, fmt.Errorf("Tool %q 合同重复注册", contract.ToolID)
+		}
 		registry.contracts[contract.ToolID] = contract
-	}
-	if err := registry.register(examplebusiness.SideEffectToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
-		return registry.fake.Execute(ctx, examplebusiness.SideEffectToolID, input, key)
-	}); err != nil {
-		return nil, err
-	}
-	if err := registry.register(examplebusiness.SummaryToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
-		return registry.fake.Execute(ctx, examplebusiness.SummaryToolID, input, key)
-	}); err != nil {
-		return nil, err
-	}
-	if mysqlAdapter != nil {
-		if err := registry.register(examplebusiness.MySQLQueryToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
-			return mysqlAdapter.Query(ctx, []byte(input["message"]))
-		}); err != nil {
-			return nil, err
-		}
-		if err := registry.register(examplebusiness.MySQLInsertToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
-			return mysqlAdapter.Insert(ctx, []byte(input["message"]), key)
-		}); err != nil {
-			return nil, err
-		}
-	}
-	if userQueryImplementation == "" || userQueryImplementation == examplebusiness.ReadOnlyToolFake {
-		if err := registry.register(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
-			return registry.fake.Execute(ctx, examplebusiness.ReadOnlyToolID, input, key)
-		}); err != nil {
-			return nil, err
-		}
-		return registry, nil
-	}
-	if userQueryImplementation != examplebusiness.ReadOnlyToolHTTP {
-		if userQueryImplementation != examplebusiness.ReadOnlyToolMCP {
-			return nil, fmt.Errorf("Tool 实现 %q 未注册", userQueryImplementation)
-		}
-		if mcpClient == nil || mcpServer == "" {
-			return nil, fmt.Errorf("MCP Tool 未配置 client 或 server")
-		}
-		if err := registry.register(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
-			return mcpClient.Call(ctx, mcpServer, examplebusiness.ReadOnlyToolID, input)
-		}); err != nil {
-			return nil, err
-		}
-		return registry, nil
-	}
-	readOnly, err := NewHTTPReadOnlyTool(endpoint, timeout)
-	if err != nil {
-		return nil, err
-	}
-	if err := registry.register(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
-		return readOnly.Execute(ctx, input)
-	}); err != nil {
-		return nil, err
 	}
 	return registry, nil
 }
@@ -178,12 +112,4 @@ func (r *Registry) ValidateOutput(toolID, output string) error {
 		return &InvocationFailure{Kind: FailureInvalidOutput, Err: err}
 	}
 	return nil
-}
-
-// OutreachCount 返回底层 fake 副作用 Tool 的实际执行次数，供本地合同测试使用。
-func (r *Registry) OutreachCount() int {
-	if r == nil || r.fake == nil {
-		return 0
-	}
-	return r.fake.OutreachCount()
 }

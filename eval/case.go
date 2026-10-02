@@ -1,3 +1,13 @@
+// Package eval defines the versioned, human-reviewed data contracts for local
+// project feature acceptance: the Dataset/Case envelope, the Selection used by
+// the PR gate, the EvaluationProfile that labels how evidence was produced, and
+// the failure/feedback records a report carries.
+//
+// The package owns parsing, validation and description of evaluation input only.
+// It does not execute Cases, collect evidence, or decide pass/fail: execution
+// belongs to eval/runner and deterministic assertions belong to eval/evaluator.
+// It owns no Runtime state, Policy, Approval, Idempotency, Tool or terminal-event
+// authority, and it must stay free of HTTP, model, database and MCP dependencies.
 package eval
 
 import "time"
@@ -23,10 +33,38 @@ type Case struct {
 	ForbiddenEffects     ForbiddenEffects `json:"forbidden_side_effects"`
 	EvidenceRequirements []string         `json:"evidence_requirements"`
 	EvaluatorRules       []string         `json:"evaluator_rules"`
+	Postconditions       Postconditions   `json:"postconditions,omitempty"`
 	Timeout              string           `json:"timeout"`
 	RetryBudget          int              `json:"retry_budget"`
 	IdempotencyKey       string           `json:"idempotency_key"`
 	CleanupPolicy        string           `json:"cleanup_policy"`
+}
+
+// Postconditions are optional deterministic checks that run after the public
+// API flow. They describe only bounded summaries, never raw SQL or records.
+type Postconditions struct {
+	Database *DatabasePostcondition `json:"database,omitempty"`
+	Logs     *LogPostcondition      `json:"logs,omitempty"`
+}
+
+type DatabasePostcondition struct {
+	Backend          string                     `json:"backend"`
+	BeforeOrderCount *int                       `json:"before_order_count,omitempty"`
+	AfterOrderCount  *int                       `json:"after_order_count,omitempty"`
+	ExpectedOrders   []DatabaseOrderExpectation `json:"expected_orders,omitempty"`
+}
+
+type DatabaseOrderExpectation struct {
+	UserID      uint64 `json:"user_id"`
+	ProductID   uint64 `json:"product_id"`
+	Quantity    int64  `json:"quantity"`
+	TotalAmount string `json:"total_amount"`
+}
+
+type LogPostcondition struct {
+	MinRecords         int      `json:"min_records,omitempty"`
+	RequiredPhases     []string `json:"required_phases,omitempty"`
+	RequiredErrorCodes []string `json:"required_error_codes,omitempty"`
 }
 
 type Preconditions struct {
@@ -41,6 +79,12 @@ type RequestStep struct {
 	Decision       string `json:"decision,omitempty"`
 	RunID          string `json:"run_id,omitempty"`
 	Subject        string `json:"subject,omitempty"`
+	// CancelAfterMS is required for the chat_cancel action: how long to wait
+	// before cancelling, measured from the moment the chat request is sent. It
+	// must fall inside the execution window, which is as long as the Tool delay
+	// configured through tools.*.fake_delay_ms; a value outside it makes the Run
+	// complete instead of being cancelled, so the Case fails loudly.
+	CancelAfterMS int `json:"cancel_after_ms,omitempty"`
 }
 
 type ExpectedResults struct {
@@ -87,7 +131,13 @@ func RequiredEvidence(item Case) []string {
 			add("approval")
 		}
 	}
-	order := []string{"events", "tool_calls", "run_state", "trace_correlation", "approval", "cleanup", "http_statuses", "sequence"}
+	if item.Postconditions.Database != nil {
+		add("database_state")
+	}
+	if item.Postconditions.Logs != nil {
+		add("diagnostic_logs")
+	}
+	order := []string{"events", "tool_calls", "run_state", "database_state", "diagnostic_logs", "trace_correlation", "approval", "cleanup", "http_statuses", "sequence"}
 	result := make([]string, 0, len(seen))
 	for _, requirement := range order {
 		if seen[requirement] {

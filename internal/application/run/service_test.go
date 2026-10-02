@@ -18,35 +18,40 @@ import (
 	authinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/auth"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/checkpoint"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/eventbus"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/llm"
 	meminfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/memory"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/persistence"
-	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
 
-func newTestService() (*Service, *toolinfra.FakeRegistry) {
+func newTestService() (*Service, *examplebusiness.FakeRuntime) {
 	repository := persistence.NewMemoryRepository()
 	checkpoints := checkpoint.NewMemoryStore()
 	events := eventbus.NewMemoryBus()
-	tools := toolinfra.NewFakeRegistry()
+	tools := examplebusiness.NewFakeRuntime()
+	routes := examplebusiness.Routes()
+	fakeRoutes := make([]llm.FakeRoute, 0, len(routes))
+	for _, route := range routes {
+		fakeRoutes = append(fakeRoutes, llm.FakeRoute{WorkerID: route.WorkerID, Intent: route.Intent, Matches: route.Matches, ToolID: route.ToolID, Risk: route.Risk})
+	}
 	deps := application.Dependencies{
 		Repository: repository,
 		Checkpoint: checkpoints,
 		EventBus:   events,
-		Supervisor: llm.NewFakeSupervisor(),
+		Supervisor: llm.NewFakeSupervisorWithBuilder(fakeRoutes, examplebusiness.FakeDecisionBuilder),
 		Policy: agent.NewPolicyGate([]operation.WorkerContract{{
 			WorkerID:     "user_analysis",
 			AllowedTools: []string{"user_query", "simulated_outreach"},
-		}}, toolinfra.Contracts()),
+		}}, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake)),
 		RunAuth: authinfra.OwnerRunAuthorizer{},
-		Tools:   tools,
+		Runner:  application.SingleToolRunner{Tools: tools},
 	}
 	return NewService(deps), tools
 }
 
 func TestFileBackedServiceRestoresApprovalAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
-	newFileService := func() (*Service, *toolinfra.FakeRegistry) {
+	newFileService := func() (*Service, *examplebusiness.FakeRuntime) {
 		repository, err := persistence.NewFileRepository(filepath.Join(dir, "runs"))
 		if err != nil {
 			t.Fatal(err)
@@ -63,18 +68,23 @@ func TestFileBackedServiceRestoresApprovalAcrossRestart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		tools := toolinfra.NewFakeRegistry()
+		tools := examplebusiness.NewFakeRuntime()
+		routes := examplebusiness.Routes()
+		fakeRoutes := make([]llm.FakeRoute, 0, len(routes))
+		for _, route := range routes {
+			fakeRoutes = append(fakeRoutes, llm.FakeRoute{WorkerID: route.WorkerID, Intent: route.Intent, Matches: route.Matches, ToolID: route.ToolID, Risk: route.Risk})
+		}
 		deps := application.Dependencies{
 			Repository: repository,
 			Checkpoint: checkpoints,
 			EventBus:   events,
 			Leases:     leases,
-			Supervisor: llm.NewFakeSupervisor(),
+			Supervisor: llm.NewFakeSupervisorWithBuilder(fakeRoutes, examplebusiness.FakeDecisionBuilder),
 			Policy: agent.NewPolicyGate([]operation.WorkerContract{{
 				WorkerID: "user_analysis", AllowedTools: []string{"user_query", "simulated_outreach"},
-			}}, toolinfra.Contracts()),
+			}}, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake)),
 			RunAuth: authinfra.OwnerRunAuthorizer{},
-			Tools:   tools,
+			Runner:  application.SingleToolRunner{Tools: tools},
 		}
 		return NewService(deps), tools
 	}
@@ -599,7 +609,7 @@ func TestCancelApprovalRunProducesCanceledTerminal(t *testing.T) {
 
 func TestToolTimeoutIsClassifiedAndDoesNotComplete(t *testing.T) {
 	service, _ := newTestService()
-	service.deps.Tools = blockingTool{}
+	service.deps.Runner = application.SingleToolRunner{Tools: blockingTool{}}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	runID, err := service.Start(ctx, request("run-timeout", "分析示例用户分群"))
@@ -618,7 +628,7 @@ func TestToolTimeoutIsClassifiedAndDoesNotComplete(t *testing.T) {
 
 func TestSensitiveToolResultIsRejectedBeforeTextProjection(t *testing.T) {
 	service, _ := newTestService()
-	service.deps.Tools = fixedTool{result: "api_key=secret /home/service/.env"}
+	service.deps.Runner = application.SingleToolRunner{Tools: fixedTool{result: "api_key=secret /home/service/.env"}}
 	runID, err := service.Start(context.Background(), request("run-sensitive", "分析示例用户分群"))
 	var runErr *Error
 	if !errors.As(err, &runErr) || runErr.Code != agent.ErrorInvalidOutput {

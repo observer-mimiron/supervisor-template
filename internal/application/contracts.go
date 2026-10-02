@@ -312,8 +312,6 @@ type Dependencies struct {
 	MemoryStore   appmemory.Store
 	MemoryRead    appmemory.Retriever
 	Observer      RuntimeObserver
-	// Tools 保留给旧装配和合同测试；新运行链路优先使用 Runner。
-	Tools ToolExecutor
 }
 
 // HealthService 暴露仅用于启动检查的依赖状态。
@@ -326,5 +324,5 @@ func (s HealthService) Healthy() bool {
 	return s.Dependencies.Repository != nil && s.Dependencies.Checkpoint != nil &&
 		s.Dependencies.EventBus != nil && s.Dependencies.Leases != nil && s.Dependencies.Supervisor != nil &&
 		s.Dependencies.Policy != nil && s.Dependencies.RunAuth != nil &&
-		(s.Dependencies.Runner != nil || s.Dependencies.Tools != nil)
+		s.Dependencies.Runner != nil
 }

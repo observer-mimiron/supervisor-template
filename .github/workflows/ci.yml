@@ -16,9 +16,109 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      # L0: formatting and static checks. These are part of the repository's
+      # documented pre-commit gate, so CI must enforce them too.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l cmd internal eval)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt required for:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+
+      # L0: package dependency direction.
       - run: go run ./cmd/archcheck
+
+      # L0: unit and contract tests, including the race detector for the
+      # concurrent run/lease/event paths.
       - run: go test ./...
+      - run: go test -race ./...
+
       - run: go test ./eval/...
+
+      # L1: every reviewed claim must point at Cases that exist, or be waived
+      # with a reason. A claim nothing verifies cannot hide behind a green run.
+      - name: coverage of claims by cases
+        run: |
+          go run ./cmd/eval \
+            -dataset ./eval/datasets/synthetic-operations-v2.json \
+            -check-coverage ./eval/coverage.json \
+            -config ./config.example.toml
+
+      # L1: deterministic runtime acceptance cases. Exit 0 = all selected cases
+      # passed, 1 = a deterministic assertion failed, 2 = setup error.
       # PR_RISK_LEVEL/PR_IMPACT_TAGS are explicit repository inputs; missing risk is fail-safe full.
-      - run: go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v1.json -report ./tmp/eval-report-ci.json -code-version ${{ github.sha }} -config ./config.example.toml -risk "${PR_RISK_LEVEL:-high}" -impact-tags "${PR_IMPACT_TAGS:-}"
+      - name: acceptance cases
+        run: |
+          go run ./cmd/eval \
+            -dataset ./eval/datasets/synthetic-operations-v2.json \
+            -report ./tmp/eval-report-ci.json \
+            -jsonl ./tmp/eval-report-ci.jsonl \
+            -triage ./tmp/eval-triage-ci.json \
+            -code-version ${{ github.sha }} \
+            -config ./config.example.toml \
+            -risk "${PR_RISK_LEVEL:-high}" \
+            -impact-tags "${PR_IMPACT_TAGS:-}"
+
+      # L1: case-level regression gate against the approved, versioned baseline.
+      # "Everything is green today" cannot see "one Case got fixed while another
+      # broke", so a Case that passed in the baseline and fails now must fail
+      # here even when the overall pass count is unchanged, and a baseline that
+      # no longer matches the dataset/evaluator versions must fail with
+      # evaluation_setup_error instead of being compared silently.
+      #
+      # This step runs the COMPLETE dataset on purpose (-risk high is the
+      # fail-safe full selection). A risk/tag-narrowed selection would report
+      # every unselected Case as `missing` and fail for a reason that has
+      # nothing to do with a regression. `go run` folds non-zero exit codes to
+      # 1, so the log line, not the code, tells a regression (1) from a setup
+      # error (2); use a built binary when the code itself must be read.
+      - name: baseline regression gate
+        run: |
+          go run ./cmd/eval \
+            -dataset ./eval/datasets/synthetic-operations-v2.json \
+            -report ./tmp/eval-report-baseline.json \
+            -baseline ./eval/baselines/synthetic-operations-v2.json \
+            -code-version ${{ github.sha }} \
+            -risk high \
+            -config ./config.example.toml
+
+      # The report is the evidence a reviewer needs when the gate fails, so it
+      # is uploaded even (and especially) on failure.
+      - name: upload evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: |
+            tmp/eval-report-ci.json
+            tmp/eval-report-ci.jsonl
+            tmp/eval-triage-ci.json
+            tmp/eval-report-baseline.json
+          if-no-files-found: warn
+          retention-days: 30
+
       # Required checks and human reviewers must still be enabled in repository settings.
+
+  # A gate that cannot fail proves nothing. This job injects real faults into the
+  # source, runs the L0/L1 gate, and fails if any fault passes undetected.
+  # It rewrites source files, so it must not share a working tree with another
+  # build; the script takes a lock to enforce that.
+  #
+  # Platform action still required: enable BOTH jobs as required checks in the
+  # repository settings, otherwise a red gate does not block a merge.
+  mutation:
+    runs-on: ubuntu-latest
+    env:
+      MODEL_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: prove the gate can fail
+        run: ./eval/mutation-gate.sh

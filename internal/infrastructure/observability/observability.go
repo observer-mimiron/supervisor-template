@@ -32,7 +32,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
-	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
 
@@ -61,6 +60,7 @@ type spanKey struct{}
 
 // Runtime 是进程级观测运行时，拥有 tracer、meter 和 exporter 的关闭入口。
 type Runtime struct {
+	provider         trace.TracerProvider
 	tracer           trace.Tracer
 	meter            metric.Meter
 	metrics          bool
@@ -77,12 +77,39 @@ type Runtime struct {
 	shutdown         func(context.Context) error
 }
 
+// Options is the infrastructure-local observability setup contract.
+type Options struct {
+	Enabled            bool
+	Endpoint           string
+	ServiceName        string
+	Insecure           bool
+	TraceSampleRate    float64
+	MetricsEnabled     bool
+	TraceFile          string
+	RotateMaxBytes     int64
+	RotateDaily        bool
+	RetentionFiles     int
+	ResourceAttributes map[string]string
+	LangfuseEnabled    bool
+	LangfuseEndpoint   string
+	LangfuseHeadersEnv string
+}
+
 // SetLogger attaches the already-configured process logger without making the
 // application layer depend on slog or this package.
 func (r *Runtime) SetLogger(logger *slog.Logger) {
 	if r != nil {
 		r.logger = logger
 	}
+}
+
+// TracerProvider exposes the process provider to infrastructure adapters that
+// create child spans, such as the GORM tracing plugin.
+func (r *Runtime) TracerProvider() trace.TracerProvider {
+	if r != nil && r.provider != nil {
+		return r.provider
+	}
+	return otel.GetTracerProvider()
 }
 
 // Observe records one bounded application lifecycle observation. The phase,
@@ -158,7 +185,7 @@ func (r *Runtime) SignalDegraded(ctx context.Context, reason string) {
 
 // Setup 创建可选的 OTLP trace exporter，并安装一次 Eino 全局 Callback。
 // endpoint 为空时仍建立本地 tracer，但不会自动连接外部 Collector。
-func Setup(ctx context.Context, cfg config.ObservabilityConfig) (*Runtime, error) {
+func Setup(ctx context.Context, cfg Options) (*Runtime, error) {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	serviceName := cfg.ServiceName
 	if serviceName == "" {
@@ -166,6 +193,7 @@ func Setup(ctx context.Context, cfg config.ObservabilityConfig) (*Runtime, error
 	}
 	if !cfg.Enabled {
 		return &Runtime{
+			provider:      otel.GetTracerProvider(),
 			tracer:        otel.Tracer(instrumentationName),
 			meter:         otel.Meter(instrumentationName),
 			metrics:       cfg.MetricsEnabled,
@@ -256,6 +284,7 @@ func Setup(ctx context.Context, cfg config.ObservabilityConfig) (*Runtime, error
 		einocallbacks.AppendGlobalHandlers(newEinoCallbackHandler())
 	})
 	runtime := &Runtime{
+		provider:      provider,
 		tracer:        provider.Tracer(instrumentationName),
 		meter:         otel.Meter(instrumentationName),
 		metrics:       cfg.MetricsEnabled,

@@ -49,6 +49,48 @@ flowchart LR
 
 Langfuse 只承载可选观测和运行评测证据，不拥有业务状态，也不决定审批、幂等、终态或权限。默认本地评测不需要 Langfuse、数据库、Apifox、真实模型或网络凭证；服务默认使用 DeepSeek，`.env`/环境变量可以覆盖 provider。
 
+## 配置优先级
+
+服务启动时配置按以下顺序生效：
+
+```text
+config.example.toml（或 -f 指定的 TOML）
+  -> TOML 同目录 .env / 已声明环境变量覆盖
+  -> cmd/server -fake 最后强制 provider=fake、model=fake-model
+```
+
+`cmd/server` 会先加载 `-f` 所在目录的 `.env`，再调用配置加载器；非空且已声明的环境变量覆盖 TOML。`cmd/server` 不带 `-fake` 时可能调用 DeepSeek，必须提供 `model.api_key_env` 指向的密钥环境变量。`FAKE_MODEL=true` 是配置层的 fake 开关；`FAKE_MODEL` 或 `fake-model` 都不是 DeepSeek、GPT、Qwen 等真实模型名称。
+
+当前支持的覆盖变量如下：
+
+| 环境变量 | 覆盖字段或作用 |
+| --- | --- |
+| `MODEL_PROVIDER` | `[model].provider`，支持 `deepseek`/`fake` |
+| `LLM_MODEL` | `[model].name` |
+| `LLM_BASE_URL` | `[model].base_url` |
+| `FAKE_MODEL` | 为 `true` 时最后把 provider/name 切到 `fake`/`fake-model` |
+| `LISTEN_ADDR` | `[server].listen_addr` |
+| `LOG_LEVEL` | `[observability].log_level` |
+| `PERSISTENCE_BACKEND` / `PERSISTENCE_DIR` | `[storage].backend` / `[storage].dir` |
+| `MYSQL_ENABLED` / `MYSQL_DSN_ENV` | `[mysql].enabled` / `[mysql].dsn_env` |
+| `OTEL_ENABLED` | `[observability].enabled` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `[observability].endpoint` |
+| `OTEL_EXPORTER_OTLP_INSECURE` / `OTEL_SERVICE_NAME` | OTLP insecure 开关 / service name |
+| `OTEL_EXPORTER_OTLP_HEADERS` | OTLP exporter 直接读取的请求头环境变量 |
+| `LANGFUSE_ENABLED` / `LANGFUSE_ENDPOINT` | `[observability].langfuse_enabled` / `langfuse_endpoint` |
+| `LANGFUSE_HEADERS_ENV` | `[observability].langfuse_headers_env`，指定承载 Langfuse 请求头的环境变量名 |
+
+`cmd/eval -langfuse-upload` 另读取 `LANGFUSE_API_URL`、`LANGFUSE_PUBLIC_KEY` 和
+`LANGFUSE_SECRET_KEY`；这些只用于可选 Score 上报，不参与本地评测判定。
+
+`cmd/eval` 的本地 Runtime Runner 在创建测试服务后无条件强制 fake，即使外部环境有 `MODEL_PROVIDER=deepseek`；因此它的报告只能说明本地合同路径通过，不能描述 DeepSeek 等真实模型的能力。
+
+评测报告会写入显式 `evaluation_profile`，区分 `runtime-fake`、`runtime-real`、`coding-fake` 和 `coding-real`。四种场景里只有 `runtime-fake` 有可执行入口：`cmd/eval` 只会产出 `runtime-fake`，其余三种只是 profile/合同边界，仓库内没有对应命令。`runtime-real` 只能来自 `cmd/eval` 之外的一次显式真实模型运行，并需单独记录；`coding-fake`/`coding-real` 仍未实现。场景由入口写入，不由 Evaluator/Judge 根据模型输出猜测；场景不匹配会返回 `evaluation_setup_error`。
+
+当你让 Coding Agent 新增接口或功能时，先让 [project-feature-evaluation skill](.agents/skills/project-feature-evaluation/SKILL.md) 生成 1~3 个验收 Case，再人工确认 JSON、状态、事件、数据库/日志后置条件和副作用限制，最后运行下面的本地命令。这个命令验证项目功能和运行合同，不代表真实模型能力。
+
+Case 还可以声明数据库和日志后置断言来验收“JSON 输出 + 最终状态 + 运行证据”。数据库断言只使用 MySQL Adapter 的数量和字段摘要哈希；日志断言只读取脱敏后的 `phase`/`error_code`。GORM logger 保留错误/慢查询但启用参数化输出；Langfuse 接收的是同一 Run 的 OTel 数据库 Span 和可选 Score，不是原始 SQL 日志。
+
 ## 架构防腐落点
 
 | 风险 | 确定性约束 | 代码/验证落点 | 状态 |
@@ -69,6 +111,7 @@ CI workflow 已接入架构检查、Go 测试、评测包测试和本地 Case Ru
 ### 1. 运行单元、合同和并发检查
 
 ```bash
+gofmt -l cmd internal eval          # 必须无输出
 go test ./...
 go test -race ./...
 go build ./cmd/server/
@@ -77,23 +120,68 @@ go run ./cmd/archcheck
 git diff --check
 ```
 
+### 1.1 基线回归门禁
+
+只看"本次是否全绿"会漏掉"修好一个、弄坏一个"。基线是一份已批准的逐用例判定快照，随仓库版本化：
+
+```bash
+# 退出码 1（退化）与 2（不可比）只有二进制能区分：go run 会把两者都折叠成 1
+go build -o ./tmp/eval ./cmd/eval
+
+# 记录/更新基线（拒绝从有失败的运行生成）
+./tmp/eval -dataset ./eval/datasets/synthetic-operations-v2.json \
+  -report ./tmp/eval-report.json -config ./config.example.toml \
+  -write-baseline ./eval/baselines/synthetic-operations-v2.json
+
+# 相对基线跑门禁（完整数据集）：出现 regression / missing 退出码为 1，版本不一致为 2
+./tmp/eval -dataset ./eval/datasets/synthetic-operations-v2.json \
+  -report ./tmp/eval-report.json -config ./config.example.toml \
+  -baseline ./eval/baselines/synthetic-operations-v2.json
+```
+
+`still_failing`（基线里本来就失败的用例）不算新增退化；`new` 只提示不失败。CI 在完整数据集上跑这一步，所以不要把 `-baseline` 与 `-risk`/`-impact-tags` 的窄选集混用，否则未选中的用例会全部报成 `missing`。详见 [docs/evaluation-method.md](./docs/evaluation-method.md#基线回归门禁)。
+
+### 1.2 闭环：需求对得上用例，失败变成待办
+
+```bash
+# 每条 claim 要么指向用例，要么显式豁免
+go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v2.json \
+  -check-coverage ./eval/coverage.json -config ./config.example.toml
+
+# 失败时额外产出可执行待办（人读 + 机器读）
+go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v2.json \
+  -report ./tmp/eval-report.json -triage ./tmp/eval-triage.json -config ./config.example.toml
+```
+
+修完必须补一个能抓住该回归的用例，并用 `./eval/mutation-gate.sh` 证明它确实会红。详见 [docs/evaluation-method.md](./docs/evaluation-method.md#闭环需求--用例--报告--待办--补用例)。
+
+### 1.3 证明门禁不是摆设
+
+上面的命令构成 L0/L1 门禁。一个不会变红的门禁等于没有门禁，所以用真实故障注入反向验证：
+
+```bash
+./eval/mutation-gate.sh
+```
+
+脚本会依次把 6 处受保护的行为改坏（白名单越权、跳过审批、放行敏感输出、双终态、取消失效、幂等去重失效），每次跑门禁并断言它必须变红，然后从备份逐字节还原源码。**只要有一条没被抓到，脚本以非 0 退出并指名该行**——那说明这条保护缺少覆盖，是下一步要补的测试。详见 [docs/evaluation-method.md](./docs/evaluation-method.md#分层门禁与改坏验证)。
+
 ### 2. 跑出一份评测报告
 
 ```bash
 go run ./cmd/eval \
-  -dataset ./eval/datasets/synthetic-operations-v1.json \
+  -dataset ./eval/datasets/synthetic-operations-v2.json \
   -report ./tmp/eval-report.json \
   -code-version dev \
   -config ./config.example.toml
 ```
 
-命令同时保留 JSON 报告，并在终端打印每个 Case 的 `PASS/FAIL`、终态和副作用写入次数，便于快速查看；JSON 报告才是 CI 和后续分析的事实来源。
+命令同时保留 JSON 报告，并在终端打印摘要行（Dataset、`scenario`、Case 总数和通过/失败数）以及每个 Case 的 `PASS/FAIL`、终态和副作用写入次数，便于快速查看；JSON 报告才是 CI 和后续分析的事实来源。摘要行显式打印 `scenario=runtime-fake`，本地 Runner 的 profile 与该场景不匹配时会在写报告前以退出码 `2` 失败。
 
-本命令默认按未知风险安全地跑完整 Dataset。当前 Dataset 有 8 个 Case，覆盖 `positive`、`negative`、`boundary` 和 `diversity`；最近一次本地运行结果为 `passed=8 failed=0`。普通变更可以按影响标签缩小范围：
+本命令默认按未知风险安全地跑完整 Dataset。当前 Dataset 有 8 个 Case，覆盖 `positive`、`negative`、`boundary` 和 `diversity`；最近一次本地运行结果为 `passed=8 failed=0`（摘要为 `scenario=runtime-fake`）。新增功能 Case 时从 [eval/datasets/feature-acceptance-template.json](./eval/datasets/feature-acceptance-template.json) 复制：该模板可被 Loader 加载并在本地 fake 链路通过，替换其中的 id、请求文本和期望结果即可。普通变更可以按影响标签缩小范围：
 
 ```bash
 go run ./cmd/eval \
-  -dataset ./eval/datasets/synthetic-operations-v1.json \
+  -dataset ./eval/datasets/synthetic-operations-v2.json \
   -report ./tmp/eval-report-low.json \
   -risk low -impact-tags audience-query \
   -code-version dev -config ./config.example.toml
@@ -129,7 +217,7 @@ go run ./cmd/server/ -f ./config.example.toml
 2. `negative-reject-outreach`：拒绝审批后进入 `failed`，没有 `tool_call`，fake 写入数保持为 0。
 3. `boundary-approved-outreach`：批准后只写入一次，重复 resume 仍保持唯一终态和 `fake_write_count=1`。
 
-完整 Case 定义在 [eval/datasets/synthetic-operations-v1.json](./eval/datasets/synthetic-operations-v1.json)，评测方法在 [docs/evaluation-method.md](./docs/evaluation-method.md)。
+完整 Case 定义在 [eval/datasets/synthetic-operations-v2.json](./eval/datasets/synthetic-operations-v2.json)，评测方法在 [docs/evaluation-method.md](./docs/evaluation-method.md)。
 
 ## 当前状态
 

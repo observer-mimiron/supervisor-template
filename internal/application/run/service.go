@@ -963,15 +963,9 @@ func (s *Service) repairStepProjectionsLocked(plan agent.ExecutionPlan) error {
 	return nil
 }
 
-// workerRunner 返回新的执行合同；旧测试和旧装配仅注入 Tool 时使用兼容适配器。
+// workerRunner 返回启动阶段装配的唯一执行合同。
 func (s *Service) workerRunner() application.WorkerRunner {
-	if s.deps.Runner != nil {
-		return s.deps.Runner
-	}
-	if s.deps.Tools != nil {
-		return application.SingleToolRunner{Tools: s.deps.Tools}
-	}
-	return nil
+	return s.deps.Runner
 }
 
 func (s *Service) observe(ctx context.Context, observation application.RuntimeObservation) {

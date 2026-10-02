@@ -4,10 +4,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 )
 
 func TestFakeRegistryIsIdempotent(t *testing.T) {
-	registry := NewFakeRegistry()
+	registry := examplebusiness.NewFakeRuntime()
 	input := map[string]string{"message": `{"customer_ids":["cust-001","cust-002"]}`}
 	for i := 0; i < 2; i++ {
 		if _, err := registry.Execute(context.Background(), "simulated_outreach", input, "run-1:step-1"); err != nil {
@@ -20,7 +22,7 @@ func TestFakeRegistryIsIdempotent(t *testing.T) {
 }
 
 func TestFakeRegistrySyntheticAudienceAndSummary(t *testing.T) {
-	registry := NewFakeRegistry()
+	registry := examplebusiness.NewFakeRuntime()
 	audience, err := registry.Execute(context.Background(), "user_query", map[string]string{"message": `{"as_of":"2026-09-25"}`}, "run-1:step-1")
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +40,7 @@ func TestFakeRegistrySyntheticAudienceAndSummary(t *testing.T) {
 }
 
 func TestFakeRegistryRejectsIdentityAndOversizedHandoff(t *testing.T) {
-	registry := NewFakeRegistry()
+	registry := examplebusiness.NewFakeRuntime()
 	for _, input := range []string{
 		`{"count":1,"customer_ids":["cust-001"],"spend_365d_total":1200,"name":"Alice"}`,
 		`{"count":1,"customer_ids":["cust-001"],"spend_365d_total":1200,"email":"alice@example.com"}`,
@@ -57,7 +59,7 @@ func TestFakeRegistryRejectsIdentityAndOversizedHandoff(t *testing.T) {
 }
 
 func TestRegistryRejectsUnknownToolID(t *testing.T) {
-	registry, err := NewRegistry("fake.user_query", "", 0)
+	registry, err := NewRegistry(0, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +69,7 @@ func TestRegistryRejectsUnknownToolID(t *testing.T) {
 }
 
 func TestContractsAreExplicitAndStable(t *testing.T) {
-	contracts := ContractsFor("mcp.read_only")
+	contracts := examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolMCP)
 	if len(contracts) != 3 || contracts[0].ToolID != "user_query" || contracts[2].ToolID != "simulated_outreach" {
 		t.Fatalf("unexpected descriptor registry: %#v", contracts)
 	}
@@ -77,7 +79,7 @@ func TestContractsAreExplicitAndStable(t *testing.T) {
 }
 
 func TestRegistryValidatesRegisteredToolInputAndOutput(t *testing.T) {
-	registry, err := NewRegistry("fake.user_query", "", 0)
+	registry, err := NewRegistry(0, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,5 +91,26 @@ func TestRegistryValidatesRegisteredToolInputAndOutput(t *testing.T) {
 	}
 	if err := registry.ValidateOutput("user_query", "\x00unsafe"); err == nil {
 		t.Fatal("expected malformed output rejection")
+	}
+}
+
+func TestRegistryRejectsDuplicateContractsAndHandlerBindings(t *testing.T) {
+	contracts := examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake)[:1]
+	if _, err := NewRegistry(0, append(contracts, contracts[0])); err == nil {
+		t.Fatal("duplicate contract accepted")
+	}
+	registry, err := NewRegistry(0, contracts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := func(context.Context, map[string]string, string) (string, error) { return "ok", nil }
+	if err := registry.RegisterHandler("missing", handler); err == nil {
+		t.Fatal("handler for unknown contract accepted")
+	}
+	if err := registry.RegisterHandler(examplebusiness.ReadOnlyToolID, handler); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterHandler(examplebusiness.ReadOnlyToolID, handler); err == nil {
+		t.Fatal("duplicate handler accepted")
 	}
 }

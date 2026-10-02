@@ -25,13 +25,16 @@ func main() {
 	if err := godotenv.Load(filepath.Join(filepath.Dir(*configPath), ".env")); err != nil && !os.IsNotExist(err) {
 		log.Fatalf("读取 .env 失败: %v", err)
 	}
-	cfg, err := config.Load(*configPath)
+	loadConfig := config.Load
+	if *fakeMode {
+		loadConfig = config.LoadWithFake
+	}
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("启动配置无效: %v", err)
 	}
 	if *fakeMode {
-		cfg.Model.Provider = "fake"
-		cfg.Model.Name = "fake-model"
+		forceFakeModel(&cfg)
 	}
 	app, err := composition.New(cfg)
 	if err != nil {
@@ -61,4 +64,9 @@ func main() {
 			log.Fatal(err)
 		}
 	}
+}
+
+func forceFakeModel(cfg *config.Config) {
+	cfg.Model.Provider = "fake"
+	cfg.Model.Name = "fake-model"
 }

@@ -17,7 +17,6 @@ import (
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
@@ -29,9 +28,20 @@ type RealSupervisor struct {
 	timeout     time.Duration
 }
 
+// ModelOptions is the infrastructure-local model configuration needed to
+// create the official DeepSeek adapter.
+type ModelOptions struct {
+	Name        string
+	BaseURL     string
+	APIKeyEnv   string
+	Temperature float64
+	MaxTokens   int
+	Timeout     time.Duration
+}
+
 // NewDeepSeekSupervisor 创建基于官方 Eino DeepSeek 适配器的 Supervisor。
 // API key 只从配置指定的环境变量读取，缺失时直接拒绝启动，避免把失败推迟到请求期。
-func NewDeepSeekSupervisor(ctx context.Context, cfg config.ModelConfig, instruction string) (*RealSupervisor, error) {
+func NewDeepSeekSupervisor(ctx context.Context, cfg ModelOptions, instruction string) (*RealSupervisor, error) {
 	envName := strings.TrimSpace(cfg.APIKeyEnv)
 	if envName == "" {
 		return nil, errors.New("真实模型缺少 API key 环境变量名")

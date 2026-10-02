@@ -47,6 +47,9 @@ func (c *recordingConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, e
 }
 func (c *recordingConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	c.record(query)
+	if strings.Contains(strings.ToLower(query), "user_id,product_id,quantity,total_amount") {
+		return &recordingRows{columns: []string{"user_id", "product_id", "quantity", "total_amount"}, values: [][]driver.Value{{uint64(1), uint64(1), int64(2), "39.80"}}}, nil
+	}
 	return &recordingRows{columns: []string{"id", "user_id", "product_id", "quantity", "total_amount", "created_at", "updated_at"}, values: [][]driver.Value{{uint64(7), uint64(1), uint64(1), int64(2), "39.80", time.Now(), time.Now()}}}, nil
 }
 func (c *recordingConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
@@ -89,11 +92,11 @@ type recordingRows struct {
 func (r *recordingRows) Columns() []string { return r.columns }
 func (r *recordingRows) Close() error      { return nil }
 func (r *recordingRows) Next(dest []driver.Value) error {
-	r.index++
 	if r.index >= len(r.values) {
 		return io.EOF
 	}
 	copy(dest, r.values[r.index])
+	r.index++
 	return nil
 }
 
@@ -110,11 +113,16 @@ func TestMySQLQueryAndInsertEmitRedactedGORMSpans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter, err := NewForDB(db)
+	connection, err := NewForDB(db)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, span := provider.Tracer("mysql-test").Start(context.Background(), "case")
+	parentTraceID := span.SpanContext().TraceID()
+	adapter := connection.NewOrderToolAdapter()
+	if err := adapter.AutoMigrate(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := adapter.Query(ctx, []byte(`{"user_id":1}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +133,11 @@ func TestMySQLQueryAndInsertEmitRedactedGORMSpans(t *testing.T) {
 
 	var querySpan, insertSpan bool
 	for _, ended := range exporter.GetSpans() {
+		if strings.Contains(strings.ToLower(ended.Name), "select orders") || strings.Contains(strings.ToLower(ended.Name), "insert orders") {
+			if ended.SpanContext.TraceID() != parentTraceID {
+				t.Fatalf("database span trace id %s does not match parent %s", ended.SpanContext.TraceID(), parentTraceID)
+			}
+		}
 		if strings.Contains(strings.ToLower(ended.Name), "select orders") {
 			querySpan = true
 		}
@@ -139,5 +152,24 @@ func TestMySQLQueryAndInsertEmitRedactedGORMSpans(t *testing.T) {
 	}
 	if !querySpan || !insertSpan {
 		t.Fatalf("query span=%v insert span=%v spans=%v", querySpan, insertSpan, exporter.GetSpans())
+	}
+}
+
+func TestOrderSnapshotReturnsBoundedFinalStateProjection(t *testing.T) {
+	conn := &recordingConn{}
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: sql.OpenDB(recordingConnector{conn: conn}), SkipInitializeWithVersion: true}), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := NewForDB(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orders, err := connection.NewOrderToolAdapter().Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 || orders[0].UserID != 1 || orders[0].ProductID != 1 || orders[0].Quantity != 2 || orders[0].TotalAmount != "39.80" {
+		t.Fatalf("unexpected snapshot=%#v", orders)
 	}
 }

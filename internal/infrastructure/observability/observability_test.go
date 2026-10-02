@@ -24,7 +24,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
-	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/eventbus"
 )
@@ -242,7 +241,7 @@ func TestSetupExportsTraceAndMetricToLocalOTLPCollector(t *testing.T) {
 	previousMeter := otel.GetMeterProvider()
 	defer otel.SetTracerProvider(previousTracer)
 	defer otel.SetMeterProvider(previousMeter)
-	runtime, err := Setup(context.Background(), config.ObservabilityConfig{
+	runtime, err := Setup(context.Background(), Options{
 		Enabled:         true,
 		Endpoint:        collector.URL,
 		ServiceName:     "template-test",
@@ -268,7 +267,7 @@ func TestSetupExportsTraceAndMetricToLocalOTLPCollector(t *testing.T) {
 }
 
 func TestSetupCanRunWithoutExporterAndShutdownIsExplicit(t *testing.T) {
-	runtime, err := Setup(context.Background(), config.ObservabilityConfig{Enabled: true, ServiceName: "test-no-exporter", TraceSampleRate: 1})
+	runtime, err := Setup(context.Background(), Options{Enabled: true, ServiceName: "test-no-exporter", TraceSampleRate: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +289,7 @@ func TestLangfuseExporterAddsIngestionHeader(t *testing.T) {
 	}))
 	defer collector.Close()
 	t.Setenv("TEST_LANGFUSE_HEADERS", "Authorization=Basic-redacted")
-	runtime, err := Setup(context.Background(), config.ObservabilityConfig{
+	runtime, err := Setup(context.Background(), Options{
 		Enabled: true, LangfuseEnabled: true, LangfuseEndpoint: collector.URL,
 		LangfuseHeadersEnv: "TEST_LANGFUSE_HEADERS", ServiceName: "langfuse-test",
 		Insecure: true, TraceSampleRate: 1, MetricsEnabled: false,

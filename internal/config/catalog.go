@@ -13,6 +13,32 @@ type Catalog struct {
 	Routes     map[string]RouteConfig
 }
 
+// RegistrationSnapshot is the composition-provided business registration
+// view. Config validates shape and references; composition supplies the set of
+// implementations that actually exists in the process.
+type RegistrationSnapshot struct {
+	Workers map[string]WorkerRegistration
+	Tools   map[string]ToolRegistration
+	Routes  map[string]RouteRegistration
+}
+
+type WorkerRegistration struct {
+	Implementation string
+	Runners        []string
+	PromptFile     string
+}
+
+type ToolRegistration struct {
+	Implementations []string
+}
+
+type RouteRegistration struct {
+	WorkerID string
+	Intent   string
+	ToolID   string
+	Risk     string
+}
+
 // RuntimeCatalog 是启动后供运行时读取的冻结能力目录。
 // 字段保持私有，访问器返回副本，调用方不能修改目录内部状态。
 type RuntimeCatalog struct {
@@ -32,9 +58,14 @@ func (c RuntimeCatalog) Limits() LimitsConfig             { return c.limits }
 func (c RuntimeCatalog) MySQL() MySQLConfig               { return c.mysql }
 
 // CompileRuntimeCatalog 校验并编译所有启动引用；编译后运行时不再读取 Config map。
-func (c Config) CompileRuntimeCatalog() (RuntimeCatalog, error) {
+func (c Config) CompileRuntimeCatalog(registrations ...RegistrationSnapshot) (RuntimeCatalog, error) {
 	if err := c.Validate(); err != nil {
 		return RuntimeCatalog{}, err
+	}
+	if len(registrations) > 0 {
+		if err := validateRegistration(c, registrations[0]); err != nil {
+			return RuntimeCatalog{}, err
+		}
 	}
 	if c.Agent.Supervisor.Enabled && strings.TrimSpace(c.Agent.Supervisor.PromptFile) == "" {
 		return RuntimeCatalog{}, fmt.Errorf("Supervisor Prompt 未注册")
@@ -60,6 +91,49 @@ func (c Config) CompileRuntimeCatalog() (RuntimeCatalog, error) {
 		limits:     c.Limits,
 		mysql:      c.MySQL,
 	}, nil
+}
+
+func validateRegistration(c Config, registration RegistrationSnapshot) error {
+	if c.Agent.Supervisor.Enabled && len(registration.Workers) == 0 {
+		return fmt.Errorf("业务 Worker 注册表为空")
+	}
+	for workerID, worker := range c.Agent.Workers {
+		if !worker.Enabled {
+			continue
+		}
+		registered, ok := registration.Workers[workerID]
+		if !ok || registered.Implementation != worker.Implementation || registered.PromptFile != worker.PromptFile {
+			return fmt.Errorf("Worker %q 未在注册快照中注册", workerID)
+		}
+		if strings.TrimSpace(worker.Runner) == "" || !containsString(registered.Runners, worker.Runner) {
+			return fmt.Errorf("Worker %q Runner %q 未在注册快照中注册", workerID, worker.Runner)
+		}
+	}
+	for toolID, tool := range c.Tools {
+		if !tool.Enabled {
+			continue
+		}
+		registered, ok := registration.Tools[toolID]
+		if !ok || !containsString(registered.Implementations, tool.Implementation) {
+			return fmt.Errorf("Tool %q 实现 %q 未在注册快照中注册", toolID, tool.Implementation)
+		}
+	}
+	for routeID, route := range c.Agent.Routes {
+		registered, ok := registration.Routes[routeID]
+		if !ok || registered.WorkerID != route.WorkerID || registered.Intent != route.Intent || registered.ToolID != route.ToolID || registered.Risk != route.Risk {
+			return fmt.Errorf("route %q 未在注册快照中注册", routeID)
+		}
+	}
+	return nil
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // CompileCatalog 校验配置并复制能力引用，避免运行期继续读取可变配置 map。

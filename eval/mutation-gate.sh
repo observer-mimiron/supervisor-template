@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+#
+# mutation-gate.sh — 证明 L0/L1 门禁不是摆设。
+#
+# 对每一条受保护的行为，在真实源码里注入一个故障，然后跑门禁：
+#   期望：门禁必须变红（非 0 退出）。
+#   如果门禁仍然是绿的，说明这条保护没有被评测覆盖 —— 那才是真正的问题。
+#
+# 用法：
+#   ./eval/mutation-gate.sh              # 跑全部
+#   ./eval/mutation-gate.sh approval     # 只跑名字匹配的那条
+#   L1_ONLY=1 ./eval/mutation-gate.sh    # 只跑 L1（跳过 go test，快）
+#
+# 说明：
+#   * 只改源码文本，改完立即从备份还原；不使用 git checkout，避免影响未提交的改动。
+#   * 编译失败也算"被抓到"（门禁确实红了），但会在输出里标明。
+#   * 必须独占运行：脚本期间源码处于被改坏状态，不能与其他构建/测试并发。
+set -uo pipefail
+
+cd "$(dirname "$0")/.." || exit 2
+ROOT="$(pwd)"
+FILTER="${1:-}"
+DATASET="${DATASET:-./eval/datasets/synthetic-operations-v2.json}"
+CONFIG="${CONFIG:-./config.example.toml}"
+L1_ONLY="${L1_ONLY:-0}"
+
+# 本脚本会临时改坏源码，因此必须独占工作区：与其他 go build / go test / 另一次
+# 改坏验证并发执行时，对方会编译到被注入的代码，结论无效。
+lock="$ROOT/.mutation-gate.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "another mutation run is active ($lock); source files are being rewritten, retry after it finishes"
+  exit 2
+fi
+
+work="$(mktemp -d)"
+
+# 中断安全：注入生效期间被 Ctrl-C / CI 取消 / 超时打断时，必须把源码还原回去，
+# 否则工作区会残留 `if false && ...` 这类改坏代码。
+current_file=""
+current_backup=""
+restore_current() {
+  if [ -n "$current_file" ] && [ -n "$current_backup" ] && [ -f "$current_backup" ]; then
+    cp "$current_backup" "$current_file" 2>/dev/null || true
+  fi
+  current_file=""
+  current_backup=""
+}
+on_exit() {
+  restore_current
+  rm -rf "$work"
+  rmdir "$lock" 2>/dev/null || true
+}
+trap on_exit EXIT
+trap 'on_exit; exit 130' INT
+trap 'on_exit; exit 143' TERM
+
+# name | file | original text | injected text
+MUTATIONS=(
+  'policy-allowlist|internal/domain/agent/policy.go|if !contains(worker.AllowedTools, toolID) {|if false \&\& !contains(worker.AllowedTools, toolID) {'
+  'approval-bypass|internal/domain/agent/policy.go|ApprovalRequired: tool.Risk == string(RiskSideEffect) || tool.RequiresApproval,|ApprovalRequired: false,'
+  'final-guard-off|internal/application/run/service.go|func guardToolResult(result string) error {|func guardToolResult(result string) error {\n\treturn nil'
+  'terminal-uniqueness-off|internal/infrastructure/eventbus/memory.go|if item.Type == Completed || item.Type == Failed || item.Type == Canceled {|if false \&\& (item.Type == Completed || item.Type == Failed || item.Type == Canceled) {'
+  'cancel-signal-lost|internal/application/run/service.go|control.cancel()|_ = control.cancel'
+  'idempotency-dedupe-off|internal/infrastructure/examplebusiness/fake_runtime.go|if result, ok := r.outreachByKey[idempotencyKey]; ok {|if result, ok := r.outreachByKey[idempotencyKey]; ok \&\& false {'
+)
+
+printf '%-26s %-8s %-8s %s\n' "mutation" "L0" "L1" "result"
+printf '%-26s %-8s %-8s %s\n' "--------------------------" "------" "------" "------"
+
+undetected=0
+total=0
+for entry in "${MUTATIONS[@]}"; do
+  IFS='|' read -r name file old new <<<"$entry"
+  if [ -n "$FILTER" ] && [[ "$name" != *"$FILTER"* ]]; then continue; fi
+  total=$((total + 1))
+
+  backup="$work/$(echo "$file" | tr '/' '_')"
+  cp "$file" "$backup"
+  # Record every applied mutation so the residual self-check compares the full
+  # injected text rather than guessing from a single line.
+  printf '%s\n' "$entry" >>"$work/applied.txt"
+  current_file="$file"
+  current_backup="$backup"
+
+  # 注入：必须精确命中一次，否则说明源码变了，这条改坏验证需要更新
+  if ! python3 - "$file" "$old" "$new" <<'PY'
+import sys
+path, old, new = sys.argv[1], sys.argv[2].replace('\\n', '\n').replace('\\&', '&'), sys.argv[3].replace('\\n', '\n').replace('\\&', '&')
+text = open(path, encoding='utf-8').read()
+count = text.count(old)
+if count != 1:
+    sys.exit(f'anchor matched {count} times in {path}: {old[:60]!r}')
+open(path, 'w', encoding='utf-8').write(text.replace(old, new, 1))
+PY
+  then
+    printf '%-26s %-8s %-8s %s\n' "$name" "-" "-" "SKIP (anchor not found)"
+    cp "$backup" "$file"
+    restore_current
+    continue
+  fi
+
+  l0="skip"
+  if [ "$L1_ONLY" != "1" ]; then
+    if (cd "$ROOT" && go test ./... >"$work/l0.log" 2>&1); then l0="green"; else l0="RED"; fi
+  fi
+
+  l1="green"
+  if (cd "$ROOT" && go run ./cmd/eval -dataset "$DATASET" -report "$work/report.json" \
+        -code-version mutation -config "$CONFIG" >"$work/l1.log" 2>&1); then
+    l1="green"
+  else
+    l1="RED"
+  fi
+
+  cp "$backup" "$file"
+  restore_current
+
+  if [ "$l0" = "red" ] || [ "$l0" = "RED" ] || [ "$l1" = "RED" ]; then
+    verdict="caught"
+  else
+    verdict="NOT CAUGHT"
+    undetected=$((undetected + 1))
+  fi
+  printf '%-26s %-8s %-8s %s\n' "$name" "$l0" "$l1" "$verdict"
+done
+
+# 自检：确认没有任何注入残留在工作区。必须用完整注入文本比对：
+# 像 final-guard-off 这类"以原文为前缀"的注入，只比首行会产生假阳性。
+if ! python3 "$ROOT/eval/check-residual.py" "$work/applied.txt"; then
+  echo "FAIL: injected fault(s) left in the working tree; restore those files before continuing."
+  exit 2
+fi
+
+echo
+if [ "$undetected" -eq 0 ]; then
+  echo "PASS: all $total injected faults were caught by the gate."
+  exit 0
+fi
+echo "FAIL: $undetected of $total injected faults passed the gate undetected."
+echo "      A green gate that cannot fail proves nothing; add coverage for the rows above."
+exit 1

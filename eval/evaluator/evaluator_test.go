@@ -2,6 +2,7 @@ package evaluator
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -48,6 +49,34 @@ func TestBusinessAssertsStructuredExpectedResult(t *testing.T) {
 		t.Fatalf("mismatched structured result=%#v", result)
 	}
 }
+
+func TestDatabaseAndLogPostconditionsAreDeterministic(t *testing.T) {
+	item := eval.Case{
+		ID: "case-postconditions", Version: "1", EvaluatorRules: allEvaluatorRules(),
+		ExpectedResults: eval.ExpectedResults{Terminal: "completed", EventTypes: []string{"completed"}},
+		Postconditions: eval.Postconditions{
+			Database: &eval.DatabasePostcondition{Backend: "mysql", BeforeOrderCount: intPtr(0), AfterOrderCount: intPtr(1), ExpectedOrders: []eval.DatabaseOrderExpectation{{UserID: 1, ProductID: 1, Quantity: 2, TotalAmount: "39.80"}}},
+			Logs:     &eval.LogPostcondition{MinRecords: 1, RequiredPhases: []string{"tool"}},
+		},
+	}
+	evidence := runner.Evidence{
+		CaseID: item.ID, CaseVersion: item.Version, RunID: item.ID, Terminal: "completed", TraceID: "trace", CleanupResult: "ok", HTTPStatus: []int{200},
+		Events:   []runner.Event{{EventID: "evt-1", RunID: item.ID, TraceID: "trace", Sequence: 1, Type: "completed"}},
+		Database: runner.DatabaseEvidence{Available: true, Backend: "mysql", BeforeOrderCount: 0, AfterOrderCount: 1, AfterOrderDigest: expectedOrderDigest(item.Postconditions.Database.ExpectedOrders)},
+		Logs:     runner.DiagnosticLogEvidence{Available: true, RecordCount: 2, Phases: []string{"tool"}, RedactionPassed: true},
+	}
+	report := Evaluate(item, evidence)
+	if !report.Passed {
+		t.Fatalf("postcondition report failed: %#v", report)
+	}
+	evidence.Database.AfterOrderDigest = "wrong"
+	result, ok := resultFor(Evaluate(item, evidence), "database_postcondition")
+	if !ok || result.Passed || result.FailedAssertion != "after_order_state" {
+		t.Fatalf("database mismatch=%#v", result)
+	}
+}
+
+func intPtr(value int) *int { return &value }
 
 func TestStabilityChecksRetryBudgetAndStepReference(t *testing.T) {
 	item := eval.Case{ID: "case-stability", Version: "1", RetryBudget: 1}
@@ -105,11 +134,17 @@ func TestFailedAssertionsBecomeFailureRecords(t *testing.T) {
 }
 
 func TestWriteJSONLIncludesEnvelopeAndCaseLines(t *testing.T) {
-	path := t.TempDir() + "/report.jsonl"
-	report := Report{DatasetName: "dataset", DatasetVersion: "1", CodeVersion: "dev", Cases: []CaseReport{{CaseID: "case-1", CaseVersion: "1"}}}
+	dir := t.TempDir()
+	path := dir + "/report.jsonl"
+	jsonPath := dir + "/report.json"
+	report := Report{ReportSchemaVersion: ReportSchemaVersion, DatasetName: "dataset", DatasetVersion: "1", CodeVersion: "dev", EvaluationProfile: eval.RuntimeFakeProfile(eval.TierPR), Cases: []CaseReport{{CaseID: "case-1", CaseVersion: "1"}}}
 	if err := WriteJSONL(path, report); err != nil {
 		t.Fatal(err)
 	}
+	if err := WriteJSON(jsonPath, report); err != nil {
+		t.Fatal(err)
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -117,14 +152,85 @@ func TestWriteJSONLIncludesEnvelopeAndCaseLines(t *testing.T) {
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	lines := 0
+	var envelope map[string]any
 	for scanner.Scan() {
 		lines++
+		if lines != 1 {
+			continue
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
 	if lines != 2 {
 		t.Fatalf("JSONL lines = %d, want 2", lines)
+	}
+
+	// Both report formats must carry the same explicit profile so a line or
+	// file is never ambiguous when read alone.
+	profile, ok := envelope["evaluation_profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("JSONL envelope has no evaluation_profile: %v", envelope)
+	}
+	if profile["scenario"] != "runtime-fake" || profile["evaluation_plane"] != "runtime" || profile["executor"] != "local-fake" || profile["model_provider"] != "fake" {
+		t.Fatalf("JSONL profile=%v", profile)
+	}
+	decoded, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jsonReport map[string]any
+	if err := json.Unmarshal(decoded, &jsonReport); err != nil {
+		t.Fatal(err)
+	}
+	jsonProfile, ok := jsonReport["evaluation_profile"].(map[string]any)
+	if !ok || jsonProfile["scenario"] != "runtime-fake" {
+		t.Fatalf("JSON report has no runtime-fake profile: %v", jsonReport)
+	}
+
+	// Both formats must declare the same schema version so a consumer can
+	// refuse a report it does not understand instead of misreading it.
+	if got, want := envelope["report_schema_version"], float64(ReportSchemaVersion); got != want {
+		t.Fatalf("JSONL envelope report_schema_version=%v, want %v", got, want)
+	}
+	if got, want := jsonReport["report_schema_version"], float64(ReportSchemaVersion); got != want {
+		t.Fatalf("JSON report report_schema_version=%v, want %v", got, want)
+	}
+	if envelope["report_schema_version"] != jsonReport["report_schema_version"] {
+		t.Fatalf("JSON and JSONL disagree on report_schema_version: %v vs %v", jsonReport["report_schema_version"], envelope["report_schema_version"])
+	}
+
+	// Neither format may carry credentials, prompts, tool payloads, SQL values
+	// or host absolute paths.
+	jsonl, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{"json": string(decoded), "jsonl": string(jsonl)} {
+		lowered := strings.ToLower(content)
+		for _, marker := range []string{"api_key", "authorization", "bearer ", "password", "-----begin", "/home/", "/workspace/", "/etc/"} {
+			if strings.Contains(lowered, marker) {
+				t.Fatalf("%s report contains sensitive marker %q", name, marker)
+			}
+		}
+	}
+}
+
+func TestBuildWithProfileRejectsMismatchedCaseProfile(t *testing.T) {
+	item := eval.Case{ID: "profile-case", Version: "1", ExpectedResults: eval.ExpectedResults{Terminal: "request_error"}}
+	dataset := eval.Dataset{Name: "dataset", Version: "1", Cases: []eval.Case{item}}
+	profile := eval.RuntimeFakeProfile(eval.TierPR)
+	evidence := runner.Evidence{CaseID: item.ID, CaseVersion: item.Version, RunID: "run-1", Profile: eval.RuntimeFakeProfile(eval.TierNightly), Error: "HTTP 400", HTTPStatus: []int{400}, CleanupResult: "ok"}
+	report := BuildWithProfile(dataset, "dev", eval.Selection{}, profile, []CaseReport{{CaseID: item.ID, CaseVersion: item.Version, Evidence: evidence}})
+	if report.Passed != 0 || report.Failed != 1 || len(report.Cases) != 1 {
+		t.Fatalf("profile mismatch passed: %#v", report)
+	}
+	result, ok := resultFor(report.Cases[0], "evaluation_setup")
+	if !ok || result.FailedAssertion != "evaluation_setup_error" {
+		t.Fatalf("profile mismatch did not fail setup: %#v", report.Cases[0])
 	}
 }
 

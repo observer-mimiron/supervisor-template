@@ -1,0 +1,73 @@
+{
+  "dataset": "synthetic-operations@2",
+  "notes": [
+    "claims 是人工评审过的映射：每条要么指向用例，要么显式豁免并写明理由。",
+    "改动用例集或新增 claim 时必须同时更新本文件与 dataset 版本。"
+  ],
+  "claims": [
+    {
+      "id": "readonly-query-result",
+      "source": "specs/002-coding-agent-evaluation/spec.md",
+      "statement": "只读客群查询按固定快照返回正确的匿名结果，且不产生任何写入",
+      "cases": ["positive-audience-query", "diversity-audience-subject-variant"]
+    },
+    {
+      "id": "serial-multi-step",
+      "source": "specs/001-eino-supervisor-template/spec.md",
+      "statement": "多步计划按顺序执行，第二步只消费第一步的有界结果",
+      "cases": ["positive-serial-summary"]
+    },
+    {
+      "id": "approval-required-before-side-effect",
+      "source": "constitution: III",
+      "statement": "副作用必须经过审批；批准前不执行、不写入；批准后同一幂等键只写一次",
+      "cases": ["boundary-approved-outreach"]
+    },
+    {
+      "id": "approval-rejected",
+      "source": "constitution: III",
+      "statement": "审批被拒绝时 Run 以失败收尾且不产生副作用",
+      "cases": ["negative-reject-outreach"]
+    },
+    {
+      "id": "policy-unknown-capability",
+      "source": "constitution: II",
+      "statement": "模型提出未注册能力时被 Policy Gate 拒绝",
+      "cases": ["negative-unknown-capability"]
+    },
+    {
+      "id": "input-validation",
+      "source": "constitution: III",
+      "statement": "非法输入被结构化校验拒绝，返回请求错误且不进入执行",
+      "cases": ["negative-invalid-input"]
+    },
+    {
+      "id": "cancel-waiting-approval",
+      "source": "constitution: IV",
+      "statement": "等待审批中的 Run 被取消后以 canceled 收尾，且不执行副作用",
+      "cases": ["boundary-cancel-outreach"]
+    },
+    {
+      "id": "cancel-during-execution",
+      "source": "constitution: IV",
+      "statement": "执行中的 Run 收到取消后以 canceled 收尾：证明取消信号真的接线",
+      "cases": ["boundary-cancel-while-executing"]
+    },
+    {
+      "id": "worker-tool-allow-list",
+      "source": "constitution: II",
+      "statement": "Worker 只能调用其 allow-list 内的 Tool；已注册但越权的 Tool 被拒绝",
+      "cases": [],
+      "waived": true,
+      "waiver_reason": "启动期配置校验（internal/config/config.go）已拒绝 route.tool 不在 Worker allow-list 的配置，因此 fake supervisor 无法提出越权候选，验收数据集在构造上不可达。该保护由 internal/domain/agent/policy_test.go 的合同测试覆盖。"
+    },
+    {
+      "id": "idempotent-replay-after-interruption",
+      "source": "constitution: III",
+      "statement": "prepared 状态中断后恢复重放同一步时不产生第二次写入",
+      "cases": [],
+      "waived": true,
+      "waiver_reason": "该性质要求 prepared 与 running 之间的进程中断（internal/application/run/service.go 的恢复路径），单进程 HTTP 验收无法制造。由 internal/application/run 的恢复合同测试覆盖。"
+    }
+  ]
+}

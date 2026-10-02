@@ -1,7 +1,7 @@
-// Package tool 提供模板使用的 fake Tool 注册表。
+// Package examplebusiness 提供模板示例业务的 fake Tool runtime。
 //
 // 这里复用父项目的“工具先注册、再按 id 执行”边界；不连接真实运营系统。
-package tool
+package examplebusiness
 
 import (
 	"bytes"
@@ -13,16 +13,45 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
+	domaintool "github.com/observer-mimiron/supervisor-template/internal/domain/tool"
+	"unicode/utf8"
 )
 
-// FakeRegistry 保存只读查询和模拟副作用 Tool 的执行结果。
-type FakeRegistry struct {
+// FakeRuntime 保存只读查询和模拟副作用 Tool 的执行结果。
+type FakeRuntime struct {
 	mu            sync.Mutex
 	outreachByKey map[string]string
 	outreachCount int
 	handlers      map[string]fakeHandler
+	toolDelays    map[string]time.Duration
+}
+
+// SetToolDelay makes the named Tool take at least delay before answering.
+//
+// A fake exists to reproduce behaviour a real dependency would show, and
+// latency is one of them: without a step that is still running, an acceptance
+// Case cannot cancel a Run *while it executes*, which is the only way to prove
+// the cancel signal is wired up. Zero (the default) leaves every existing
+// Case's timing unchanged. The wait observes the context, so a cancelled Run
+// behaves like a real Tool that notices cancellation.
+func (r *FakeRuntime) SetToolDelay(toolID string, delay time.Duration) {
+	if r == nil || delay <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.toolDelays == nil {
+		r.toolDelays = map[string]time.Duration{}
+	}
+	r.toolDelays[toolID] = delay
+}
+
+func (r *FakeRuntime) toolDelay(toolID string) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.toolDelays[toolID]
 }
 
 type fakeHandler func(map[string]string, string) (string, error)
@@ -132,9 +161,9 @@ func marshalBounded(value any) (string, error) {
 }
 
 // NewFakeRegistry 创建默认 fake Tool 注册表。
-func NewFakeRegistry() *FakeRegistry {
-	r := &FakeRegistry{outreachByKey: make(map[string]string), handlers: make(map[string]fakeHandler)}
-	r.handlers[examplebusiness.ReadOnlyToolID] = func(input map[string]string, _ string) (string, error) {
+func NewFakeRuntime() *FakeRuntime {
+	r := &FakeRuntime{outreachByKey: make(map[string]string), handlers: make(map[string]fakeHandler)}
+	r.handlers[ReadOnlyToolID] = func(input map[string]string, _ string) (string, error) {
 		object, err := decodeStrictObject(input["message"])
 		if err != nil || len(object) != 1 {
 			return "", errors.New("查询输入无效")
@@ -150,13 +179,13 @@ func NewFakeRegistry() *FakeRegistry {
 		if err != nil {
 			return "", err
 		}
-		audience, err := examplebusiness.QueryAudience(query)
+		audience, err := QueryAudience(query)
 		if err != nil {
 			return "", fmt.Errorf("查询输入无效: %w", err)
 		}
 		return marshalBounded(audience)
 	}
-	r.handlers[examplebusiness.SummaryToolID] = func(input map[string]string, _ string) (string, error) {
+	r.handlers[SummaryToolID] = func(input map[string]string, _ string) (string, error) {
 		object, err := decodeStrictObject(input["message"])
 		if err != nil {
 			return "", fmt.Errorf("汇总输入无效: %w", err)
@@ -171,7 +200,7 @@ func NewFakeRegistry() *FakeRegistry {
 		}
 		return marshalBounded(summaryOutput{Count: count, Spend365dTotal: spend, Segments: segments})
 	}
-	r.handlers[examplebusiness.SideEffectToolID] = func(input map[string]string, idempotencyKey string) (string, error) {
+	r.handlers[SideEffectToolID] = func(input map[string]string, idempotencyKey string) (string, error) {
 		if idempotencyKey == "" {
 			return "", errors.New("副作用 Tool 缺少幂等键")
 		}
@@ -218,16 +247,16 @@ func NewFakeRegistry() *FakeRegistry {
 }
 
 // Execute 执行已由 Policy Gate 选中的 Tool。
-func (r *FakeRegistry) Execute(ctx context.Context, toolID string, input map[string]string, idempotencyKey string) (string, error) {
+func (r *FakeRuntime) Execute(ctx context.Context, toolID string, input map[string]string, idempotencyKey string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	contracts := ContractsFor(examplebusiness.ReadOnlyToolFake)
+	contracts := ToolContracts(ReadOnlyToolFake)
 	var contractFound bool
 	for _, contract := range contracts {
 		if contract.ToolID == toolID {
 			contractFound = true
-			if err := validateInput(contract, input); err != nil {
+			if err := validateFakeInput(contract, input); err != nil {
 				return "", err
 			}
 			break
@@ -235,6 +264,15 @@ func (r *FakeRegistry) Execute(ctx context.Context, toolID string, input map[str
 	}
 	if !contractFound {
 		return "", fmt.Errorf("Tool %q 未注册", toolID)
+	}
+	if delay := r.toolDelay(toolID); delay > 0 {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timer.C:
+		}
 	}
 	handler, ok := r.handlers[toolID]
 	if !ok {
@@ -244,28 +282,67 @@ func (r *FakeRegistry) Execute(ctx context.Context, toolID string, input map[str
 }
 
 // ValidateInput validates the fake registry's registered Tool schema.
-func (r *FakeRegistry) ValidateInput(toolID string, input map[string]string) error {
-	for _, contract := range ContractsFor(examplebusiness.ReadOnlyToolFake) {
+func (r *FakeRuntime) ValidateInput(toolID string, input map[string]string) error {
+	for _, contract := range ToolContracts(ReadOnlyToolFake) {
 		if contract.ToolID == toolID {
-			return validateInput(contract, input)
+			return validateFakeInput(contract, input)
 		}
 	}
 	return fmt.Errorf("Tool %q 未注册", toolID)
 }
 
 // ValidateOutput validates the fake registry's registered Tool output schema.
-func (r *FakeRegistry) ValidateOutput(toolID, output string) error {
-	for _, contract := range ContractsFor(examplebusiness.ReadOnlyToolFake) {
+func (r *FakeRuntime) ValidateOutput(toolID, output string) error {
+	for _, contract := range ToolContracts(ReadOnlyToolFake) {
 		if contract.ToolID == toolID {
-			return validateOutput(contract, output)
+			return validateFakeOutput(contract, output)
 		}
 	}
 	return fmt.Errorf("Tool %q 未注册", toolID)
 }
 
 // OutreachCount 返回模拟副作用实际执行次数。
-func (r *FakeRegistry) OutreachCount() int {
+func (r *FakeRuntime) OutreachCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.outreachCount
+}
+
+func validateFakeInput(contract domaintool.Contract, input map[string]string) error {
+	if input == nil {
+		return errors.New("Tool 输入不能为空")
+	}
+	for key, value := range input {
+		if strings.TrimSpace(key) == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") {
+			return errors.New("Tool 输入包含非法字段")
+		}
+	}
+	for _, required := range contract.RequiredInputs {
+		if strings.TrimSpace(input[required]) == "" {
+			return fmt.Errorf("Tool 输入缺少 %s", required)
+		}
+	}
+	if contract.MaxInputBytes > 0 {
+		total := 0
+		for key, value := range input {
+			total += len(key) + len(value)
+		}
+		if total > contract.MaxInputBytes {
+			return errors.New("Tool 输入超过大小限制")
+		}
+	}
+	return nil
+}
+
+func validateFakeOutput(contract domaintool.Contract, output string) error {
+	if strings.TrimSpace(output) == "" {
+		return errors.New("Tool 输出为空")
+	}
+	if !utf8.ValidString(output) {
+		return errors.New("Tool 输出不是有效 UTF-8")
+	}
+	if contract.MaxOutputBytes > 0 && len(output) > contract.MaxOutputBytes {
+		return errors.New("Tool 输出超过大小限制")
+	}
+	return nil
 }

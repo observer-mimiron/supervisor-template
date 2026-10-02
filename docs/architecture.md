@@ -43,7 +43,12 @@
 
 - 包依赖由 `cmd/archcheck` 检查，并在 `.github/workflows/ci.yml` 中作为 CI 步骤执行；目标是保持 `interfaces -> application -> domain`，基础设施只通过领域/应用合同向内接入。
 - `RuntimeCatalog` 在启动时冻结 Worker、Route、Prompt、Runner、Tool 和预算引用。配置只能选择已注册实现，不能创造能力、扩大权限或降低审批等级。
+- 业务模块是唯一注册源；composition 将其转换为纯数据 `RegistrationSnapshot`，`CompileRuntimeCatalog` 只校验快照引用。`PolicyGate` 私有化 Worker/Tool allow-list，并在构造时深拷贝。
+- Application 只接受 `WorkerRunner`；默认 `SingleToolRunner` 也必须通过 dispatcher 装配，不能直接把裸 Tool 放进运行服务。通用 Tool Registry 只持有外部合同和 handler，不依赖示例业务、MCP 或 MySQL。
+- 基础设施配置使用本地 `Credential`、`ModelOptions` 和 observability `Options`，由 composition 从 config 映射；`cmd/archcheck` 同时检查 cmd/application、interfaces/tool 和 infrastructure/config 禁止边。
+- MySQL 由共享 `Connection`、`RunLeaseAdapter`、`OrderToolAdapter` 组成；只有 Connection 负责 GORM plugin 和关闭，订单与 lease 迁移/操作各自归属适配器。
 - Domain 合同不导入 HTTP、Eino、数据库、MCP、具体模型或 SSE。Trace、日志和 SQL 只能提供证据，不能成为业务状态 owner。
+- 评测 Executor 只负责调用项目入口并采集有界 Evidence；Application 仍拥有 Runtime 状态、Policy、Approval、Idempotency 和终态。评测报告的 `EvaluationProfile` 由入口写入，Evaluator/Judge 不得从模型输出推断场景。
 
 ### 运行时确定性约束
 
@@ -83,7 +88,7 @@
 | `internal/composition/` | 注册表、实现选择、依赖注入和运行装配 | 业务流程、隐式全局状态和绕过合同的快捷调用 |
 | `configs/` | 后续可放部署配置样例；当前 v1 以根目录 `config.example.toml` 为入口，目录可以不存在 | 密钥、运行时代码、业务规则或修改权限上限；新增顶层目录仍须遵守宪法 |
 | `docs/` | 架构、技术基线、数据流和验收说明 | 生产代码、隐式运行规则和与架构事实冲突的副本 |
-| `specs/` | Feature Spec、Plan、Research、Data Model、Contract、Tasks | 把计划状态写成代码完成，或绕过宪法定义新规则 |
+| `specs/` | 本地 Spec Kit 工作区：Feature Spec、Plan、Research、Data Model、Contract、Tasks；与 `.specify/` 一起 gitignore，不随模板发布 | 把计划状态写成代码完成，或绕过宪法定义新规则 |
 
 `internal/domain/` 的隔离是硬边界：替换 Gin、Eino、数据库、MCP、模型或 SSE 时，领域合同和含义不能改变。`Manager` 是唯一的运行状态和 `ExecutionPlan` owner；Worker 不能发布最终答复，最终答复必须经过 `Final Guard` 和统一事件投影。
 
@@ -116,7 +121,7 @@ v1 同时保留内存和文件 Repository/checkpoint/event store；示例业务 
 
 应用层应依赖稳定的 WorkerRunner 合同。普通函数 Worker、Eino ReAct、Graph 或其他执行器应作为基础设施适配器接入；更换执行器不应修改 HTTP、Policy Gate、状态机、通用运行循环和 SSE 投影。Runner/Tool 必须遵守 `context.Context`，取消是协作式语义，不对外承诺强制终止任意外部进程。
 
-组件化增量的历史背景、注册合同和故障边界见 [脚手架演进先行方案](./scaffold-evolution-plan.md)；当前待执行工作只以 [Implementation Plan](../specs/001-eino-supervisor-template/plan.md)、其 `tasks.md` 和 `PROGRESS.md` 为准。
+组件化增量的历史背景、注册合同和故障边界见 [脚手架演进先行方案](./scaffold-evolution-plan.md)；当前待执行工作只以 `PROGRESS.md` 和本地 Spec Kit 工作区 `specs/` 中的 Implementation Plan 与 `tasks.md` 为准（`specs/` 不随模板发布，因此这里不给链接）。
 和 [组件参考矩阵](./component-reference-map.md)。`ExecutionPlan` 是业务状态唯一 owner，checkpoint 只做恢复投影，RunEvent 只做事件投影；三者之间没有隐式万能事件总线或跨存储事务假设。
 
 当前实现已通过 `WorkerRunner` 作为应用层执行边界：启动阶段由 `RunnerFactory` 按 `RuntimeCatalog` 为每个 Worker 构建 Runner，再由 `WorkerRunnerDispatcher` 按 WorkerID 分派；默认 `SingleToolRunner` 仍只执行一次已批准 Tool，`eino_adk` 则由 `AgentFactory` 按已批准步骤构建 ADK Agent。更换执行器不改变运行状态机和 SSE 投影。启动阶段会校验路由、Worker、Prompt、Runner、Tool allow-list 和预算引用；运行期不再读取可变配置 map。真实运营业务、完整身份平台和 ReAct/Graph DSL 仍属于延期范围。

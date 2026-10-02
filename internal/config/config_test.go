@@ -145,12 +145,47 @@ func TestLoadAppliesOnlyDocumentedEnvironmentOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server.ListenAddr != ":18080" || cfg.Observability.LogLevel != "debug" || cfg.Model.Provider != "fake" {
+	if cfg.Server.ListenAddr != ":18080" || cfg.Observability.LogLevel != "debug" || cfg.Model.Provider != "fake" || cfg.Model.Name != "fake-model" {
 		t.Fatalf("environment override not applied: %#v", cfg)
 	}
 	t.Setenv("FAKE_MODEL", "invalid")
 	if _, err := Load(filepath.Join("..", "..", "config.example.toml")); err == nil {
 		t.Fatal("expected invalid FAKE_MODEL to fail")
+	}
+}
+
+func TestLoadModelProviderOverrideAndFakeSwitch(t *testing.T) {
+	t.Setenv("MODEL_PROVIDER", "fake")
+	t.Setenv("FAKE_MODEL", "")
+	cfg, err := Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.Provider != "fake" || cfg.Model.Name != "fake-model" {
+		t.Fatalf("MODEL_PROVIDER did not override TOML: %#v", cfg.Model)
+	}
+
+	t.Setenv("MODEL_PROVIDER", "deepseek")
+	t.Setenv("FAKE_MODEL", "true")
+	cfg, err = Load(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.Provider != "fake" || cfg.Model.Name != "fake-model" {
+		t.Fatalf("FAKE_MODEL=true did not win after MODEL_PROVIDER: %q", cfg.Model.Provider)
+	}
+}
+
+func TestLoadWithFakeWinsBeforeValidation(t *testing.T) {
+	t.Setenv("MODEL_PROVIDER", "unregistered-provider")
+	t.Setenv("LLM_MODEL", "unregistered-model")
+	t.Setenv("FAKE_MODEL", "invalid")
+	cfg, err := LoadWithFake(filepath.Join("..", "..", "config.example.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model.Provider != "fake" || cfg.Model.Name != "fake-model" {
+		t.Fatalf("forced fake did not win before validation: %#v", cfg.Model)
 	}
 }
 

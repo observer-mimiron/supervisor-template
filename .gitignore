@@ -4,6 +4,7 @@ Thumbs.db
 *.out
 *.test
 *.exe
+vendor/
 /server
 coverage/
 var/
@@ -20,6 +21,19 @@ agent-architecture-references/
 # Local planning and workspace artifacts
 AGENTS.md
 .agents/
+# Keep only the shared feature-evaluation skill versioned.
+!.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/project-feature-evaluation/
+.agents/skills/project-feature-evaluation/*
+!.agents/skills/project-feature-evaluation/SKILL.md
+!.agents/skills/project-feature-evaluation/agents/
+.agents/skills/project-feature-evaluation/agents/*
+!.agents/skills/project-feature-evaluation/agents/openai.yaml
+# Spec Kit workflow and feature artifacts stay local; they are not published.
 .specify/
+specs/
 go.work
 go.work.sum

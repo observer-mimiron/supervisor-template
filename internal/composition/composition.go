@@ -45,6 +45,21 @@ type App struct {
 	Close          func(context.Context) error
 	snapshot       RuntimeSnapshot
 	fakeWriteCount func() int
+	databaseState  func(context.Context) (DatabaseState, error)
+}
+
+// DatabaseState is a bounded postcondition projection. It deliberately keeps
+// only fields needed to verify the example order contract.
+type DatabaseState struct {
+	Backend string
+	Orders  []DatabaseOrder
+}
+
+type DatabaseOrder struct {
+	UserID      uint64
+	ProductID   uint64
+	Quantity    int64
+	TotalAmount string
 }
 
 // RuntimeSnapshot is the immutable startup capability view used by local
@@ -93,16 +108,23 @@ func (a *App) FakeWriteCount() int {
 	return a.fakeWriteCount()
 }
 
+// DatabaseState returns the optional MySQL projection used by local cases.
+// Memory-only runs return an unavailable backend without touching business
+// state.
+func (a *App) DatabaseState(ctx context.Context) (DatabaseState, error) {
+	if a == nil || a.databaseState == nil {
+		return DatabaseState{}, nil
+	}
+	return a.databaseState(ctx)
+}
+
 // New 根据已校验配置创建依赖图，并选择内存/文件、fake/真实和 MCP 基础设施实现。
 func New(cfg config.Config) (*App, error) {
-	catalog, err := cfg.CompileRuntimeCatalog()
+	catalog, err := cfg.CompileRuntimeCatalog(exampleBusinessRegistration())
 	if err != nil {
 		return nil, err
 	}
-	if err := validateExampleBusiness(catalog); err != nil {
-		return nil, err
-	}
-	observation, err := observability.Setup(context.Background(), cfg.Observability)
+	observation, err := observability.Setup(context.Background(), observabilityOptions(cfg.Observability))
 	if err != nil {
 		return nil, fmt.Errorf("观测装配失败: %w", err)
 	}
@@ -134,32 +156,49 @@ func New(cfg config.Config) (*App, error) {
 		observation.SignalDegraded(context.Background(), "log_file")
 		observability.Log(context.Background(), logger, slog.LevelWarn, "observability.degraded", slog.String("signal", "log_file"), slog.String("error_class", "unavailable"))
 	}
-	var mysqlAdapter *mysqlinfra.Adapter
+	var mysqlConnection *mysqlinfra.Connection
+	var mysqlOrders *mysqlinfra.OrderToolAdapter
+	var mysqlLeases *mysqlinfra.RunLeaseAdapter
+	var databaseState func(context.Context) (DatabaseState, error)
 	if mysqlConfig := catalog.MySQL(); mysqlConfig.Enabled {
 		dsn := os.Getenv(mysqlConfig.DSNEnv)
 		if dsn == "" {
 			return nil, fmt.Errorf("MySQL DSN 环境变量 %q 未设置", mysqlConfig.DSNEnv)
 		}
-		mysqlAdapter, err = mysqlinfra.Open(context.Background(), dsn, nil)
+		mysqlConnection, err = mysqlinfra.Open(context.Background(), dsn, observation.TracerProvider(), logger)
 		if err != nil {
 			return nil, err
 		}
+		mysqlOrders = mysqlConnection.NewOrderToolAdapter()
+		mysqlLeases = mysqlConnection.NewRunLeaseAdapter()
+		databaseState = func(ctx context.Context) (DatabaseState, error) {
+			orders, snapshotErr := mysqlOrders.Snapshot(ctx)
+			state := DatabaseState{Backend: "mysql", Orders: make([]DatabaseOrder, 0, len(orders))}
+			for _, order := range orders {
+				state.Orders = append(state.Orders, DatabaseOrder{UserID: order.UserID, ProductID: order.ProductID, Quantity: order.Quantity, TotalAmount: order.TotalAmount})
+			}
+			return state, snapshotErr
+		}
 		if mysqlConfig.AutoMigrate {
-			if err := mysqlAdapter.AutoMigrate(context.Background()); err != nil {
-				_ = mysqlAdapter.Close()
+			if err := mysqlOrders.AutoMigrate(context.Background()); err != nil {
+				_ = mysqlConnection.Close()
 				return nil, fmt.Errorf("MySQL 迁移失败: %w", err)
+			}
+			if err := mysqlLeases.AutoMigrate(context.Background()); err != nil {
+				_ = mysqlConnection.Close()
+				return nil, fmt.Errorf("MySQL lease 迁移失败: %w", err)
 			}
 		}
 		if mysqlConfig.Seed {
-			if err := mysqlAdapter.Seed(context.Background()); err != nil {
-				_ = mysqlAdapter.Close()
+			if err := mysqlOrders.Seed(context.Background()); err != nil {
+				_ = mysqlConnection.Close()
 				return nil, fmt.Errorf("MySQL 种子失败: %w", err)
 			}
 		}
 	}
 	defer func() {
-		if cleanup && mysqlAdapter != nil {
-			_ = mysqlAdapter.Close()
+		if cleanup && mysqlConnection != nil {
+			_ = mysqlConnection.Close()
 		}
 	}()
 	var repository application.Repository = persistence.NewMemoryRepository()
@@ -194,13 +233,16 @@ func New(cfg config.Config) (*App, error) {
 	var supervisor application.DecisionProvider
 	switch cfg.Model.Provider {
 	case "fake":
-		supervisor = llm.NewFakeSupervisor(toFakeRoutes(catalog.Routes())...)
+		supervisor = llm.NewFakeSupervisorWithBuilder(toFakeRoutes(catalog.Routes()), examplebusiness.FakeDecisionBuilder)
 	case "deepseek":
 		instruction, readErr := os.ReadFile(catalog.Supervisor().PromptFile)
 		if readErr != nil {
 			return nil, fmt.Errorf("读取 Supervisor Prompt 失败: %w", readErr)
 		}
-		supervisor, err = llm.NewDeepSeekSupervisor(context.Background(), cfg.Model, string(instruction))
+		supervisor, err = llm.NewDeepSeekSupervisor(context.Background(), llm.ModelOptions{
+			Name: cfg.Model.Name, BaseURL: cfg.Model.BaseURL, APIKeyEnv: cfg.Model.APIKeyEnv,
+			Temperature: cfg.Model.Temperature, MaxTokens: cfg.Model.MaxTokens, Timeout: cfg.Model.Timeout,
+		}, string(instruction))
 		if err != nil {
 			return nil, err
 		}
@@ -219,9 +261,70 @@ func New(cfg config.Config) (*App, error) {
 			return nil, fmt.Errorf("MCP 装配失败: %w", err)
 		}
 	}
-	tools, err := toolinfra.NewRegistryWithMCP(userQuery.Implementation, userQuery.Endpoint, userQuery.Timeout, mcpClient, userQuery.MCPServer, mysqlAdapter)
+	contracts := examplebusiness.ToolContracts(userQuery.Implementation)
+	if mysqlOrders != nil {
+		contracts = examplebusiness.ToolContractsWithMySQL(userQuery.Implementation)
+		leases = mysqlLeases
+	}
+	tools, err := toolinfra.NewRegistry(userQuery.Timeout, contracts)
 	if err != nil {
 		return nil, fmt.Errorf("Tool 装配失败: %w", err)
+	}
+	fakeRuntime := examplebusiness.NewFakeRuntime()
+	// fake_delay_ms 只影响 fake 实现：让某一步保持"仍在执行"，验收用例才能在其中取消。
+	fakeRuntime.SetToolDelay(examplebusiness.ReadOnlyToolID, time.Duration(userQuery.FakeDelayMS)*time.Millisecond)
+	fakeRuntime.SetToolDelay(examplebusiness.SummaryToolID, time.Duration(catalog.Tools()[examplebusiness.SummaryToolID].FakeDelayMS)*time.Millisecond)
+	fakeRuntime.SetToolDelay(examplebusiness.SideEffectToolID, time.Duration(catalog.Tools()[examplebusiness.SideEffectToolID].FakeDelayMS)*time.Millisecond)
+	if err := tools.RegisterHandler(examplebusiness.SummaryToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
+		return fakeRuntime.Execute(ctx, examplebusiness.SummaryToolID, input, key)
+	}); err != nil {
+		return nil, fmt.Errorf("Summary Tool 装配失败: %w", err)
+	}
+	if err := tools.RegisterHandler(examplebusiness.SideEffectToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
+		return fakeRuntime.Execute(ctx, examplebusiness.SideEffectToolID, input, key)
+	}); err != nil {
+		return nil, fmt.Errorf("副作用 Tool 装配失败: %w", err)
+	}
+	switch userQuery.Implementation {
+	case "", examplebusiness.ReadOnlyToolFake:
+		if err := tools.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
+			return fakeRuntime.Execute(ctx, examplebusiness.ReadOnlyToolID, input, key)
+		}); err != nil {
+			return nil, fmt.Errorf("查询 Tool 装配失败: %w", err)
+		}
+	case examplebusiness.ReadOnlyToolHTTP:
+		readOnly, buildErr := toolinfra.NewHTTPReadOnlyTool(userQuery.Endpoint, userQuery.Timeout)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		if err := tools.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
+			return readOnly.Execute(ctx, input)
+		}); err != nil {
+			return nil, fmt.Errorf("HTTP Tool 装配失败: %w", err)
+		}
+	case examplebusiness.ReadOnlyToolMCP:
+		if mcpClient == nil || userQuery.MCPServer == "" {
+			return nil, errors.New("MCP Tool 未配置 client 或 server")
+		}
+		if err := tools.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
+			return mcpClient.Call(ctx, userQuery.MCPServer, examplebusiness.ReadOnlyToolID, input)
+		}); err != nil {
+			return nil, fmt.Errorf("MCP Tool 装配失败: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("Tool 实现 %q 未注册", userQuery.Implementation)
+	}
+	if mysqlOrders != nil {
+		if err := tools.RegisterHandler(examplebusiness.MySQLQueryToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
+			return mysqlOrders.Query(ctx, []byte(input["message"]))
+		}); err != nil {
+			return nil, fmt.Errorf("MySQL 查询 Tool 装配失败: %w", err)
+		}
+		if err := tools.RegisterHandler(examplebusiness.MySQLInsertToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
+			return mysqlOrders.Insert(ctx, []byte(input["message"]), key)
+		}); err != nil {
+			return nil, fmt.Errorf("MySQL 写入 Tool 装配失败: %w", err)
+		}
 	}
 	workers := make([]operation.WorkerContract, 0, len(cfg.Agent.Workers))
 	limits := catalog.Limits()
@@ -248,13 +351,16 @@ func New(cfg config.Config) (*App, error) {
 	if budget.Timeout <= 0 {
 		budget.Timeout = 5 * time.Second
 	}
-	contracts := toolinfra.ContractsFor(userQuery.Implementation)
-	if mysqlAdapter != nil {
-		leases = mysqlAdapter
-		contracts = toolinfra.ContractsForMySQL(userQuery.Implementation)
-	}
 	policy := agent.NewPolicyGate(workers, contracts)
-	authenticator := authinfra.NewStaticBearerAuthenticator(cfg.Auth.Credentials)
+	authCredentials := make([]authinfra.Credential, 0, len(cfg.Auth.Credentials))
+	for _, credential := range cfg.Auth.Credentials {
+		authCredentials = append(authCredentials, authinfra.Credential{
+			TokenSHA256Env: credential.TokenSHA256Env,
+			TenantID:       credential.TenantID,
+			SubjectID:      credential.SubjectID,
+		})
+	}
+	authenticator := authinfra.NewStaticBearerAuthenticator(authCredentials)
 	var modelProvider ModelProvider
 	if realSupervisor, ok := supervisor.(*llm.RealSupervisor); ok {
 		modelProvider = realSupervisor
@@ -284,7 +390,6 @@ func New(cfg config.Config) (*App, error) {
 		Policy:        policy,
 		RunAuth:       authinfra.OwnerRunAuthorizer{},
 		Runner:        runner,
-		Tools:         tools,
 		ToolValidator: tools,
 		MemoryStore:   memoryStore,
 		MemoryRead:    memoryStore,
@@ -311,15 +416,16 @@ func New(cfg config.Config) (*App, error) {
 			sort.Strings(snapshot.WorkerTools[workerID])
 		}
 	}
-	app := &App{Config: cfg, Logger: logger, Authenticator: authenticator, Run: runapp.NewService(deps), Memory: memoryStore, Health: application.HealthService{Dependencies: deps}, snapshot: snapshot, fakeWriteCount: tools.OutreachCount}
+	app := &App{Config: cfg, Logger: logger, Authenticator: authenticator, Run: runapp.NewService(deps), Memory: memoryStore, Health: application.HealthService{Dependencies: deps}, snapshot: snapshot, fakeWriteCount: fakeRuntime.OutreachCount, databaseState: databaseState}
 	app.Close = func(shutdownCtx context.Context) error {
-		shutdownErr := observation.Shutdown(shutdownCtx)
-		if mysqlAdapter != nil {
-			shutdownErr = errors.Join(shutdownErr, mysqlAdapter.Close())
+		var shutdownErr error
+		if mysqlConnection != nil {
+			shutdownErr = errors.Join(shutdownErr, mysqlConnection.Close())
 		}
 		if logCloser != nil {
 			shutdownErr = errors.Join(shutdownErr, logCloser.Close())
 		}
+		shutdownErr = errors.Join(shutdownErr, observation.Shutdown(shutdownCtx))
 		return shutdownErr
 	}
 	if !app.Health.Healthy() {
@@ -344,29 +450,44 @@ func toFakeRoutes(routes map[string]config.RouteConfig) []llm.FakeRoute {
 	return converted
 }
 
-// validateExampleBusiness confirms that configuration only selects capabilities
-// declared by the explicit example module; it does not create new business IDs.
-func validateExampleBusiness(catalog config.RuntimeCatalog) error {
-	for workerID, worker := range catalog.Workers() {
-		if !worker.Enabled {
-			continue
-		}
-		registered, ok := examplebusiness.WorkerFor(workerID)
-		runnerOK := worker.Runner == registered.Runner || worker.Runner == "eino_adk"
-		if !ok || worker.Implementation != registered.Implementation || !runnerOK || worker.PromptFile != registered.PromptFile {
-			return fmt.Errorf("Worker %q 未在示例业务模块注册", workerID)
+func exampleBusinessRegistration() config.RegistrationSnapshot {
+	registration := config.RegistrationSnapshot{
+		Workers: make(map[string]config.WorkerRegistration),
+		Tools:   make(map[string]config.ToolRegistration),
+		Routes:  make(map[string]config.RouteRegistration),
+	}
+	for _, worker := range examplebusiness.Workers() {
+		runners := []string{worker.Runner, examplebusiness.EinoRunnerID}
+		registration.Workers[worker.WorkerID] = config.WorkerRegistration{
+			Implementation: worker.Implementation,
+			Runners:        runners,
+			PromptFile:     worker.PromptFile,
 		}
 	}
-	for toolID, tool := range catalog.Tools() {
-		if tool.Enabled && !examplebusiness.ToolImplementationRegistered(toolID, tool.Implementation) {
-			return fmt.Errorf("Tool %q 未在示例业务模块注册", toolID)
+	for _, toolID := range examplebusiness.ToolIDs() {
+		registration.Tools[toolID] = config.ToolRegistration{
+			Implementations: examplebusiness.ToolImplementations(toolID),
 		}
 	}
-	for routeID, route := range catalog.Routes() {
-		registered, ok := examplebusiness.RouteFor(routeID)
-		if !ok || route.WorkerID != registered.WorkerID || route.ToolID != registered.ToolID || route.Intent != registered.Intent || agent.Risk(route.Risk) != registered.Risk {
-			return fmt.Errorf("route %q 未在示例业务模块注册", routeID)
+	for _, route := range examplebusiness.Routes() {
+		registration.Routes[route.ID] = config.RouteRegistration{
+			WorkerID: route.WorkerID,
+			Intent:   route.Intent,
+			ToolID:   route.ToolID,
+			Risk:     string(route.Risk),
 		}
 	}
-	return nil
+	return registration
+}
+
+func observabilityOptions(cfg config.ObservabilityConfig) observability.Options {
+	return observability.Options{
+		Enabled: cfg.Enabled, Endpoint: cfg.Endpoint, ServiceName: cfg.ServiceName,
+		Insecure: cfg.Insecure, TraceSampleRate: cfg.TraceSampleRate,
+		MetricsEnabled: cfg.MetricsEnabled, TraceFile: cfg.TraceFile,
+		RotateMaxBytes: cfg.RotateMaxBytes, RotateDaily: cfg.RotateDaily,
+		RetentionFiles: cfg.RetentionFiles, ResourceAttributes: cfg.ResourceAttributes,
+		LangfuseEnabled: cfg.LangfuseEnabled, LangfuseEndpoint: cfg.LangfuseEndpoint,
+		LangfuseHeadersEnv: cfg.LangfuseHeadersEnv,
+	}
 }

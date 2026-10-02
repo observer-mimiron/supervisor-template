@@ -52,6 +52,15 @@ func (e *Error) Error() string { return e.Err.Error() }
 // Unwrap 支持标准库的 context 超时判断。
 func (e *Error) Unwrap() error { return e.Err }
 
+// FailureClass keeps adapter-specific classification consumable by the
+// generic Tool registry without making that package depend on MCP.
+func (e *Error) FailureClass() string {
+	if e == nil {
+		return ""
+	}
+	return string(e.Class)
+}
+
 // Classify 返回 MCP 错误的稳定分类。
 func Classify(err error) ErrorClass {
 	var classified *Error

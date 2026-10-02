@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Feature Evaluation"
+  short_description: "Verify feature acceptance with project evidence"
+  default_prompt: "Use $project-feature-evaluation to derive acceptance checks, run relevant project evaluations, and report evidence."

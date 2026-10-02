@@ -12,7 +12,6 @@ import (
 	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
@@ -100,8 +99,7 @@ func TestNewDeepSeekSupervisorUsesOfficialAdapterAgainstLocalEndpoint(t *testing
 	defer server.Close()
 	t.Setenv("TEST_LLM_API_KEY", "test-key")
 
-	supervisor, err := NewDeepSeekSupervisor(context.Background(), config.ModelConfig{
-		Provider:    "deepseek",
+	supervisor, err := NewDeepSeekSupervisor(context.Background(), ModelOptions{
 		Name:        "deepseek-chat",
 		BaseURL:     server.URL,
 		APIKeyEnv:   "TEST_LLM_API_KEY",

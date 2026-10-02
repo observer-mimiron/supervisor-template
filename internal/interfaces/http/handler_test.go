@@ -20,7 +20,6 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	einoinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/eino"
-	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
 
 func TestChatProjectsReadOnlyRunAsOrderedSSE(t *testing.T) {
@@ -301,10 +300,6 @@ func TestEinoSelectedHTTPApprovalAndResumeStayApplicationOwned(t *testing.T) {
 	} else if _, ok := runner.(*einoinfra.Runner); !ok {
 		t.Fatalf("selected Worker runner = %T, want *eino.Runner", runner)
 	}
-	registry, ok := app.Health.Dependencies.Tools.(*toolinfra.Registry)
-	if !ok {
-		t.Fatalf("Tool executor = %T, want *tool.Registry", app.Health.Dependencies.Tools)
-	}
 	send := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		if body != "" {
@@ -321,15 +316,15 @@ func TestEinoSelectedHTTPApprovalAndResumeStayApplicationOwned(t *testing.T) {
 	if response := create("run-eino-reject"); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "approval_required") {
 		t.Fatalf("initial approval response = %d %s", response.Code, response.Body.String())
 	}
-	if supervisorCalls.Load() != 1 || workerCalls.Load() != 0 || registry.OutreachCount() != 0 {
-		t.Fatalf("pending Eino run executed early: supervisor=%d worker=%d writes=%d", supervisorCalls.Load(), workerCalls.Load(), registry.OutreachCount())
+	if supervisorCalls.Load() != 1 || workerCalls.Load() != 0 || app.FakeWriteCount() != 0 {
+		t.Fatalf("pending Eino run executed early: supervisor=%d worker=%d writes=%d", supervisorCalls.Load(), workerCalls.Load(), app.FakeWriteCount())
 	}
 	if response := send(http.MethodPost, "/api/runs/run-eino-reject/approval", `{"decision":"reject"}`); response.Code != http.StatusOK {
 		t.Fatalf("reject response = %d %s", response.Code, response.Body.String())
 	}
 	rejected := app.Run.Events("run-eino-reject")
-	if len(rejected) == 0 || rejected[len(rejected)-1].Type != agent.Failed || workerCalls.Load() != 0 || registry.OutreachCount() != 0 {
-		t.Fatalf("rejected Eino run executed: events=%#v worker=%d writes=%d", rejected, workerCalls.Load(), registry.OutreachCount())
+	if len(rejected) == 0 || rejected[len(rejected)-1].Type != agent.Failed || workerCalls.Load() != 0 || app.FakeWriteCount() != 0 {
+		t.Fatalf("rejected Eino run executed: events=%#v worker=%d writes=%d", rejected, workerCalls.Load(), app.FakeWriteCount())
 	}
 	if response := create("run-eino-approve"); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "approval_required") {
 		t.Fatalf("second approval response = %d %s", response.Code, response.Body.String())
@@ -340,11 +335,11 @@ func TestEinoSelectedHTTPApprovalAndResumeStayApplicationOwned(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		response := send(http.MethodPost, "/api/runs/run-eino-approve/resume", "")
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "event: completed") {
-			t.Fatalf("resume %d response = %d %s (supervisor=%d worker=%d writes=%d)", i, response.Code, response.Body.String(), supervisorCalls.Load(), workerCalls.Load(), registry.OutreachCount())
+			t.Fatalf("resume %d response = %d %s (supervisor=%d worker=%d writes=%d)", i, response.Code, response.Body.String(), supervisorCalls.Load(), workerCalls.Load(), app.FakeWriteCount())
 		}
 	}
-	if workerCalls.Load() != 1 || registry.OutreachCount() != 1 {
-		t.Fatalf("approved Eino step replayed: worker=%d writes=%d", workerCalls.Load(), registry.OutreachCount())
+	if workerCalls.Load() != 1 || app.FakeWriteCount() != 1 {
+		t.Fatalf("approved Eino step replayed: worker=%d writes=%d", workerCalls.Load(), app.FakeWriteCount())
 	}
 	terminalCount := 0
 	for _, event := range app.Run.Events("run-eino-approve") {
@@ -418,16 +413,11 @@ func TestArbitraryUnmatchedMessageDoesNotCallReadOnlyTool(t *testing.T) {
 	if !ok {
 		t.Fatal("composition did not install user_analysis runner")
 	}
-	runner, ok := runnerValue.(application.SingleToolRunner)
-	if !ok {
+	if _, ok := runnerValue.(application.SingleToolRunner); !ok {
 		t.Fatalf("composition installed runner %T, want SingleToolRunner", runnerValue)
 	}
-	registry, ok := runner.Tools.(*toolinfra.Registry)
-	if !ok {
-		t.Fatal("composition did not install registered Tool")
-	}
-	if registry.OutreachCount() != 0 {
-		t.Fatalf("unmatched message entered a Tool: count=%d", registry.OutreachCount())
+	if app.FakeWriteCount() != 0 {
+		t.Fatalf("unmatched message entered a Tool: count=%d", app.FakeWriteCount())
 	}
 }
 

@@ -148,20 +148,44 @@ func ToolContracts(readOnlyImplementation string) []domaintool.Contract {
 	}
 }
 
-// ToolImplementationRegistered 判断配置中的 Tool 实现是否属于本模块注册集合。
-func ToolImplementationRegistered(toolID, implementation string) bool {
+// ToolContractsWithMySQL returns the base contracts plus optional order Tools.
+func ToolContractsWithMySQL(readOnlyImplementation string) []domaintool.Contract {
+	contracts := ToolContracts(readOnlyImplementation)
+	return append(contracts,
+		domaintool.Contract{ToolID: MySQLQueryToolID, Implementation: MySQLQueryImpl, Risk: string(agent.RiskReadOnly), RetryLimit: 1, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 64 << 10},
+		domaintool.Contract{ToolID: MySQLInsertToolID, Implementation: MySQLInsertImpl, Risk: string(agent.RiskSideEffect), RequiresApproval: true, IdempotencyRequired: true, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 64 << 10},
+	)
+}
+
+// ToolIDs returns all Tool IDs owned by this business module.
+func ToolIDs() []string {
+	return []string{ReadOnlyToolID, SummaryToolID, SideEffectToolID, MySQLQueryToolID, MySQLInsertToolID}
+}
+
+// ToolImplementations 返回指定 Tool 的已注册实现集合副本。
+func ToolImplementations(toolID string) []string {
 	switch toolID {
 	case ReadOnlyToolID:
-		return implementation == ReadOnlyToolFake || implementation == ReadOnlyToolHTTP || implementation == ReadOnlyToolMCP
+		return []string{ReadOnlyToolFake, ReadOnlyToolHTTP, ReadOnlyToolMCP}
 	case SummaryToolID:
-		return implementation == SummaryToolFake
+		return []string{SummaryToolFake}
 	case SideEffectToolID:
-		return implementation == SideEffectToolFake
+		return []string{SideEffectToolFake}
 	case MySQLQueryToolID:
-		return implementation == MySQLQueryImpl
+		return []string{MySQLQueryImpl}
 	case MySQLInsertToolID:
-		return implementation == MySQLInsertImpl
+		return []string{MySQLInsertImpl}
 	default:
-		return false
+		return nil
 	}
+}
+
+// ToolImplementationRegistered 判断配置中的 Tool 实现是否属于本模块注册集合。
+func ToolImplementationRegistered(toolID, implementation string) bool {
+	for _, candidate := range ToolImplementations(toolID) {
+		if candidate == implementation {
+			return true
+		}
+	}
+	return false
 }

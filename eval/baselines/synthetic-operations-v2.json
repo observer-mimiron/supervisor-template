@@ -1,0 +1,64 @@
+{
+  "baseline_name": "synthetic-operations",
+  "dataset_name": "synthetic-operations",
+  "dataset_version": "2",
+  "evaluator_version": "2",
+  "report_schema_version": 2,
+  "approved_at": "2026-10-02T08:37:34.676090666Z",
+  "cases": [
+    {
+      "case_id": "boundary-approved-outreach",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "de9a95e820f200b128a880d32881f9712a4a2138e85b1470542e8dd0f054843e"
+    },
+    {
+      "case_id": "boundary-cancel-outreach",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "06899a96db12eb83cb02f420b5b747b0e7eb3b7644f1c6fa45090eb69eb46f2a"
+    },
+    {
+      "case_id": "boundary-cancel-while-executing",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "752cd3dc18342f1006da5121eed700faac2a3f03e4d1551b2683653cd4492483"
+    },
+    {
+      "case_id": "diversity-audience-subject-variant",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "8688eee9307e2fd5d3e6892232aad83174a5985eb453cc3580d964d0f73c24bc"
+    },
+    {
+      "case_id": "negative-invalid-input",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "ae94cb46ae40d10b509aec510d83b587a4093fcb0d25d105e71c7dc332a6e5f6"
+    },
+    {
+      "case_id": "negative-reject-outreach",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "070944da509802459395bd9a5847eb29e996a4cc543f3431b8fee18339cf0bfd"
+    },
+    {
+      "case_id": "negative-unknown-capability",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "9dbead98f7f69067e4f80e9e4fa074dc751189e7c3b004630242a4c078752938"
+    },
+    {
+      "case_id": "positive-audience-query",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "392bb15eab05563e9fc3d2344b0ccf14ada54e645ed050879b2043bc084f1ba5"
+    },
+    {
+      "case_id": "positive-serial-summary",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "c25278fdc55418483f99470dc525da54d9e6bb4febfc00025ce73969ca1118c0"
+    }
+  ]
+}

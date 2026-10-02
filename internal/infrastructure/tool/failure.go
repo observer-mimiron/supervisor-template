@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
-	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/mcp"
 )
 
 // FailureKind preserves adapter details while mapping them to the shared application error classes.
@@ -80,19 +79,19 @@ func normalizeInvocationError(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return &InvocationFailure{Kind: FailureCanceled, Err: err}
 	}
-	var remote *mcp.Error
-	if errors.As(err, &remote) {
+	var classified interface{ FailureClass() string }
+	if errors.As(err, &classified) {
 		kind := FailureBusiness
-		switch remote.Class {
-		case mcp.ErrorTimeout:
+		switch classified.FailureClass() {
+		case "timeout":
 			kind = FailureTimeout
-		case mcp.ErrorUnavailable, mcp.ErrorService:
+		case "unavailable", "service_error":
 			kind = FailureUnavailable
-		case mcp.ErrorProtocol:
+		case "protocol_error":
 			kind = FailureProtocol
-		case mcp.ErrorDenied:
+		case "server_denied":
 			kind = FailurePolicyDenied
-		case mcp.ErrorBusiness, mcp.ErrorHTTP, mcp.ErrorInvalidConfig:
+		case "business_error", "http_error", "invalid_config":
 			kind = FailureBusiness
 		}
 		return &InvocationFailure{Kind: kind, Err: err}

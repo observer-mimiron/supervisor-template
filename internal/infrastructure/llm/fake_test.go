@@ -57,24 +57,27 @@ func TestFakeSupervisorRejectsArbitraryUnmatchedMessageAsUnknownRoute(t *testing
 }
 
 func TestFakeSupervisorUsesStrictMySQLFixtures(t *testing.T) {
-	supervisor := NewFakeSupervisor(FakeRoute{
+	supervisor := NewFakeSupervisorWithBuilder([]FakeRoute{{
 		WorkerID: examplebusiness.MySQLWorkerID,
 		Intent:   examplebusiness.MySQLWorkerID,
 		Matches:  []string{"查询订单"},
 		ToolID:   examplebusiness.MySQLQueryToolID,
 		Risk:     agent.RiskReadOnly,
-	})
+	}}, examplebusiness.FakeDecisionBuilder)
 	decision, err := supervisor.Decide(context.Background(), conversation.ExecutionRequest{RunID: "mysql-query", Message: "查询订单"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Arguments["message"] != fixedOrderQuery {
+	if decision.Arguments["message"] != `{"user_id":1}` {
 		t.Fatalf("mysql query payload = %q", decision.Arguments["message"])
 	}
 }
 
 func TestFakeSupervisorUsesProjectionForSideEffect(t *testing.T) {
-	decision, err := NewFakeSupervisor().Decide(context.Background(), conversation.ExecutionRequest{
+	route, _ := examplebusiness.RouteFor(examplebusiness.SideEffectToolID)
+	decision, err := NewFakeSupervisorWithBuilder([]FakeRoute{{
+		WorkerID: route.WorkerID, Intent: route.Intent, Matches: route.Matches, ToolID: route.ToolID, Risk: route.Risk,
+	}}, examplebusiness.FakeDecisionBuilder).Decide(context.Background(), conversation.ExecutionRequest{
 		RunID: "outreach-payload", Message: "模拟触达示例用户",
 	})
 	if err != nil {
@@ -83,7 +86,7 @@ func TestFakeSupervisorUsesProjectionForSideEffect(t *testing.T) {
 	if decision.Arguments["tool_id"] != examplebusiness.SideEffectToolID {
 		t.Fatalf("tool id = %q", decision.Arguments["tool_id"])
 	}
-	if decision.Arguments["message"] != fixedAudienceProjection {
+	if decision.Arguments["message"] != `{"count":4,"customer_ids":["cust-001","cust-002","cust-006","cust-008"],"spend_365d_total":6200}` {
 		t.Fatalf("side-effect payload = %q", decision.Arguments["message"])
 	}
 }

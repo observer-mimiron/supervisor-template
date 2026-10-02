@@ -11,7 +11,6 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/config"
 	einoinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/eino"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
-	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
 
 func TestRunnerFactoryBuildsSingleToolRunner(t *testing.T) {
@@ -54,7 +53,7 @@ func TestRunnerFactoryRejectsIncompleteEinoWiring(t *testing.T) {
 }
 
 func TestRunnerFactoryBuildsEinoRunnerWithApprovedDependencies(t *testing.T) {
-	factory := NewRunnerFactory(modelProviderStub{model: stubChatModel{}}, fakeExecutor{}, fakeValidator{}, toolinfra.Contracts(), einoinfra.NewMemoryCheckpointStore())
+	factory := NewRunnerFactory(modelProviderStub{model: stubChatModel{}}, fakeExecutor{}, fakeValidator{}, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake), einoinfra.NewMemoryCheckpointStore())
 	runner, err := factory.Build(context.Background(), config.WorkerConfig{Runner: examplebusiness.EinoRunnerID})
 	if err != nil {
 		t.Fatal(err)

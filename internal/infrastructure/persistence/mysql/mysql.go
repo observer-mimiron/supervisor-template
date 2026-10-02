@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -17,10 +20,11 @@ import (
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
 
-	"go.opentelemetry.io/otel/trace"
 	"github.com/observer-mimiron/supervisor-template/internal/application"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -81,17 +85,36 @@ type insertInput struct {
 	TotalAmount string `json:"total_amount"`
 }
 
-type Adapter struct {
+// Connection owns the shared GORM connection pool. Feature adapters borrow it
+// but never close it themselves.
+type Connection struct {
+	db *gorm.DB
+}
+
+type RunLeaseAdapter struct {
+	db *gorm.DB
+}
+
+type OrderToolAdapter struct {
 	db          *gorm.DB
 	mu          sync.Mutex
 	idempotency map[string]string
 }
 
-func Open(ctx context.Context, dsn string, provider trace.TracerProvider) (*Adapter, error) {
+// OrderSnapshot is the bounded, non-sensitive projection used by deterministic
+// evaluation. It intentionally omits timestamps, associations and raw SQL.
+type OrderSnapshot struct {
+	UserID      uint64
+	ProductID   uint64
+	Quantity    int64
+	TotalAmount string
+}
+
+func Open(ctx context.Context, dsn string, provider trace.TracerProvider, loggers ...*slog.Logger) (*Connection, error) {
 	if strings.TrimSpace(dsn) == "" {
 		return nil, errors.New("MySQL DSN 不能为空")
 	}
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: safeLogger(loggers...)})
 	if err != nil {
 		return nil, fmt.Errorf("打开 MySQL 失败: %w", err)
 	}
@@ -108,42 +131,71 @@ func Open(ctx context.Context, dsn string, provider trace.TracerProvider) (*Adap
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("连接 MySQL 失败: %w", err)
 	}
-	return &Adapter{db: db, idempotency: make(map[string]string)}, nil
+	return &Connection{db: db}, nil
 }
 
-// NewForDB creates an adapter around a test or externally managed GORM DB.
-func NewForDB(db *gorm.DB) (*Adapter, error) {
+// safeLogger keeps useful local GORM failures/slow-query diagnostics while
+// never rendering bound values into logs. Database spans carry the structured
+// operation signal used by Langfuse.
+func safeLogger(loggers ...*slog.Logger) gormlogger.Interface {
+	output := log.New(os.Stderr, "gorm ", log.LstdFlags)
+	if len(loggers) > 0 && loggers[0] != nil {
+		output = slog.NewLogLogger(loggers[0].Handler(), slog.LevelWarn)
+	}
+	return gormlogger.New(output, gormlogger.Config{
+		SlowThreshold:             200 * time.Millisecond,
+		LogLevel:                  gormlogger.Warn,
+		IgnoreRecordNotFoundError: true,
+		ParameterizedQueries:      true,
+		Colorful:                  false,
+	})
+}
+
+// NewForDB creates a connection around a test or externally managed GORM DB.
+func NewForDB(db *gorm.DB) (*Connection, error) {
 	if db == nil {
 		return nil, errors.New("GORM DB 不能为空")
 	}
 	if err := db.Use(tracing.NewPlugin(tracing.WithoutQueryVariables())); err != nil {
 		return nil, err
 	}
-	return &Adapter{db: db, idempotency: make(map[string]string)}, nil
+	return &Connection{db: db}, nil
 }
 
-func (a *Adapter) DB() *gorm.DB { return a.db }
-
-func (a *Adapter) Close() error {
-	if a == nil || a.db == nil {
+func (c *Connection) NewRunLeaseAdapter() *RunLeaseAdapter {
+	if c == nil {
 		return nil
 	}
-	db, err := a.db.DB()
+	return &RunLeaseAdapter{db: c.db}
+}
+
+func (c *Connection) NewOrderToolAdapter() *OrderToolAdapter {
+	if c == nil {
+		return nil
+	}
+	return &OrderToolAdapter{db: c.db, idempotency: make(map[string]string)}
+}
+
+func (c *Connection) Close() error {
+	if c == nil || c.db == nil {
+		return nil
+	}
+	db, err := c.db.DB()
 	if err != nil {
 		return err
 	}
 	return db.Close()
 }
 
-func (a *Adapter) AutoMigrate(ctx context.Context) error {
+func (a *RunLeaseAdapter) AutoMigrate(ctx context.Context) error {
 	if a == nil || a.db == nil {
 		return errors.New("MySQL adapter 未装配")
 	}
-	return a.db.WithContext(ctx).AutoMigrate(&User{}, &Product{}, &Order{}, &runLeaseRow{})
+	return a.db.WithContext(ctx).AutoMigrate(&runLeaseRow{})
 }
 
 // Claim atomically creates a lease or replaces an expired lease for one Run.
-func (a *Adapter) Claim(ctx context.Context, lease application.RunLease, now time.Time) (bool, error) {
+func (a *RunLeaseAdapter) Claim(ctx context.Context, lease application.RunLease, now time.Time) (bool, error) {
 	if err := validateLease(ctx, lease, now); err != nil {
 		return false, err
 	}
@@ -157,7 +209,7 @@ func (a *Adapter) Claim(ctx context.Context, lease application.RunLease, now tim
 	return a.Owns(ctx, lease, now)
 }
 
-func (a *Adapter) Owns(ctx context.Context, lease application.RunLease, now time.Time) (bool, error) {
+func (a *RunLeaseAdapter) Owns(ctx context.Context, lease application.RunLease, now time.Time) (bool, error) {
 	var count int64
 	err := a.db.WithContext(ctx).Model(&runLeaseRow{}).
 		Where("run_id = ? AND owner_token = ? AND expires_at > ?", lease.RunID, lease.OwnerToken, now).
@@ -165,7 +217,7 @@ func (a *Adapter) Owns(ctx context.Context, lease application.RunLease, now time
 	return count == 1, err
 }
 
-func (a *Adapter) Release(ctx context.Context, lease application.RunLease) error {
+func (a *RunLeaseAdapter) Release(ctx context.Context, lease application.RunLease) error {
 	return a.db.WithContext(ctx).Where("run_id = ? AND owner_token = ?", lease.RunID, lease.OwnerToken).Delete(&runLeaseRow{}).Error
 }
 
@@ -181,7 +233,16 @@ func validateLease(ctx context.Context, lease application.RunLease, now time.Tim
 
 // Seed inserts a tiny deterministic local fixture. It is opt-in and safe to
 // repeat because IDs are fixed and FirstOrCreate is used.
-func (a *Adapter) Seed(ctx context.Context) error {
+func (a *OrderToolAdapter) AutoMigrate(ctx context.Context) error {
+	if a == nil || a.db == nil {
+		return errors.New("MySQL adapter 未装配")
+	}
+	return a.db.WithContext(ctx).AutoMigrate(&User{}, &Product{}, &Order{})
+}
+
+// Seed inserts a tiny deterministic local fixture. It is opt-in and safe to
+// repeat because IDs are fixed and FirstOrCreate is used.
+func (a *OrderToolAdapter) Seed(ctx context.Context) error {
 	if a == nil || a.db == nil {
 		return errors.New("MySQL adapter 未装配")
 	}
@@ -200,7 +261,7 @@ func (a *Adapter) Seed(ctx context.Context) error {
 	return nil
 }
 
-func (a *Adapter) Query(ctx context.Context, raw []byte) (string, error) {
+func (a *OrderToolAdapter) Query(ctx context.Context, raw []byte) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -224,7 +285,24 @@ func (a *Adapter) Query(ctx context.Context, raw []byte) (string, error) {
 	return string(encoded), err
 }
 
-func (a *Adapter) Insert(ctx context.Context, raw []byte, idempotencyKey string) (string, error) {
+// Snapshot returns the final order state needed by an evaluation
+// postcondition. The result is capped to keep a broken fixture from becoming
+// an unbounded report payload.
+func (a *OrderToolAdapter) Snapshot(ctx context.Context) ([]OrderSnapshot, error) {
+	if a == nil || a.db == nil {
+		return nil, errors.New("MySQL adapter 未装配")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var orders []OrderSnapshot
+	err := a.db.WithContext(ctx).Model(&Order{}).
+		Select("user_id, product_id, quantity, total_amount").
+		Order("id asc").Limit(1000).Find(&orders).Error
+	return orders, err
+}
+
+func (a *OrderToolAdapter) Insert(ctx context.Context, raw []byte, idempotencyKey string) (string, error) {
 	input, err := decodeInsert(raw)
 	if err != nil {
 		return "", err

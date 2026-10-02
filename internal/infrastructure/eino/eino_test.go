@@ -14,6 +14,7 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/application/run"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	domaintool "github.com/observer-mimiron/supervisor-template/internal/domain/tool"
+	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 	toolinfra "github.com/observer-mimiron/supervisor-template/internal/infrastructure/tool"
 )
 
@@ -93,12 +94,19 @@ func TestAgentRunnerRoutesToolCallingModelThroughApprovedTool(t *testing.T) {
 }
 
 func TestEinoSideEffectUsesApprovalBoundaryAndIdempotency(t *testing.T) {
-	registry, err := toolinfra.NewRegistry("fake.user_query", "", time.Second)
+	contracts := examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake)
+	registry, err := toolinfra.NewRegistry(time.Second, contracts)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fakeRuntime := examplebusiness.NewFakeRuntime()
+	if err := registry.RegisterHandler(examplebusiness.SideEffectToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
+		return fakeRuntime.Execute(ctx, examplebusiness.SideEffectToolID, input, key)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	model := &deterministicToolCallingModel{toolName: "simulated_outreach", arguments: `{"message":"{\"count\":4,\"customer_ids\":[\"cust-001\",\"cust-002\",\"cust-006\",\"cust-008\"],\"spend_365d_total\":6200}"}`}
-	runner, err := NewAgentRunner(context.Background(), model, NewMemoryCheckpointStore(), toolinfra.Contracts(), registry, registry)
+	runner, err := NewAgentRunner(context.Background(), model, NewMemoryCheckpointStore(), contracts, registry, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +115,7 @@ func TestEinoSideEffectUsesApprovalBoundaryAndIdempotency(t *testing.T) {
 		Input: map[string]string{"message": `{"count":4,"customer_ids":["cust-001","cust-002","cust-006","cust-008"],"spend_365d_total":6200}`}, IdempotencyKey: "run-eino-side-effect:step-1",
 		Step: agent.PlanStep{StepID: "step-1", WorkerID: "worker", Intent: "outreach", ToolID: "simulated_outreach", Input: map[string]string{"message": `{"count":4,"customer_ids":["cust-001","cust-002","cust-006","cust-008"],"spend_365d_total":6200}`}, Status: agent.StepRunning, IdempotencyKey: "run-eino-side-effect:step-1"},
 	}
-	if registry.OutreachCount() != 0 {
+	if fakeRuntime.OutreachCount() != 0 {
 		t.Fatal("side effect happened before the approved Eino Tool was constructed")
 	}
 	if _, err := runner.Run(context.Background(), request); err != nil {
@@ -116,8 +124,8 @@ func TestEinoSideEffectUsesApprovalBoundaryAndIdempotency(t *testing.T) {
 	if _, err := runner.Run(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
-	if registry.OutreachCount() != 1 {
-		t.Fatalf("repeated approved Eino step was not idempotent: count=%d", registry.OutreachCount())
+	if fakeRuntime.OutreachCount() != 1 {
+		t.Fatalf("repeated approved Eino step was not idempotent: count=%d", fakeRuntime.OutreachCount())
 	}
 }
 

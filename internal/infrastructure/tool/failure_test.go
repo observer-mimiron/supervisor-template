@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
+	domaintool "github.com/observer-mimiron/supervisor-template/internal/domain/tool"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/mcp"
 )
@@ -84,8 +85,17 @@ func TestRegistryNormalizesHTTPFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(test.handler)
 			defer server.Close()
-			registry, err := NewRegistry(examplebusiness.ReadOnlyToolHTTP, server.URL, test.timeout)
+			adapter, err := NewHTTPReadOnlyTool(server.URL, test.timeout)
 			if err != nil {
+				t.Fatal(err)
+			}
+			registry, err := NewRegistry(test.timeout, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolHTTP)[:1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := registry.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
+				return adapter.Execute(ctx, input)
+			}); err != nil {
 				t.Fatal(err)
 			}
 			_, err = registry.Execute(context.Background(), examplebusiness.ReadOnlyToolID, map[string]string{"message": "query"}, "")
@@ -96,8 +106,13 @@ func TestRegistryNormalizesHTTPFailures(t *testing.T) {
 
 func TestRegistryNormalizesLocalAndMCPFailures(t *testing.T) {
 	t.Run("local business failure", func(t *testing.T) {
-		registry, err := NewRegistry("", "", time.Second)
+		registry, err := NewRegistry(time.Second, []domaintool.Contract{{ToolID: examplebusiness.SideEffectToolID, Implementation: examplebusiness.SideEffectToolFake, Risk: "side_effect", RequiredInputs: []string{"message"}}})
 		if err != nil {
+			t.Fatal(err)
+		}
+		if err := registry.RegisterHandler(examplebusiness.SideEffectToolID, func(context.Context, map[string]string, string) (string, error) {
+			return "", errors.New("rejected")
+		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err = registry.Execute(context.Background(), examplebusiness.SideEffectToolID, map[string]string{"message": "touch"}, "")
@@ -127,8 +142,13 @@ func TestRegistryNormalizesLocalAndMCPFailures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			registry, err := NewRegistryWithMCP(examplebusiness.ReadOnlyToolMCP, "", time.Second, client, "approved")
+			registry, err := NewRegistry(time.Second, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolMCP)[:1])
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := registry.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
+				return client.Call(ctx, "approved", examplebusiness.ReadOnlyToolID, input)
+			}); err != nil {
 				t.Fatal(err)
 			}
 			_, err = registry.Execute(context.Background(), examplebusiness.ReadOnlyToolID, map[string]string{"message": "query"}, "")
@@ -148,8 +168,13 @@ func TestRegistryNormalizesLocalAndMCPFailures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		registry, err := NewRegistryWithMCP(examplebusiness.ReadOnlyToolMCP, "", 5*time.Millisecond, client, "approved")
+		registry, err := NewRegistry(5*time.Millisecond, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolMCP)[:1])
 		if err != nil {
+			t.Fatal(err)
+		}
+		if err := registry.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
+			return client.Call(ctx, "approved", examplebusiness.ReadOnlyToolID, input)
+		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err = registry.Execute(context.Background(), examplebusiness.ReadOnlyToolID, map[string]string{"message": "query"}, "")

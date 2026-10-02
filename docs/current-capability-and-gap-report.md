@@ -12,7 +12,7 @@
 
 ## 证据边界
 
-- 本地事实以 `PROGRESS.md`、当前代码、`specs/001-eino-supervisor-template/tasks.md` 和合同测试为准。计划文档、配置字段或接口存在本身不等于功能闭环。
+- 本地事实以 `PROGRESS.md`、当前代码和合同测试为准；计划状态记录在本地 Spec Kit 工作区 `specs/`（随 `.specify/` 一起 gitignore，不随模板发布），其中的 plan/tasks 只是输入，不能当作功能已闭环。计划文档、配置字段或接口存在本身不等于功能闭环。
 - 新鲜验证：`go test ./...`、`go test -race ./...`、`go build ./cmd/server/`、`go vet ./...`、`go run ./cmd/archcheck`、`git diff --check`，以及高风险 8 Case、低风险标签选择 3 Case 均通过；这些是当前工作树的本地证据。
 - `examplebusiness/fixture.go` 已接入 `user_query`、`user_summary_query` 和模拟触达的本地 fake 链路，说明 Dataset 可从 HTTP/SSE 入口跑通；这不等于真实 CRM/营销业务或真实业务质量基准。
 - 本轮没有联网调研。Temporal Go SDK 和 LangGraph 上游源码在当前工作区不可用，因此只记录为概念基线并标记 `deferred`，不把它们的实现语义当作本项目证据。

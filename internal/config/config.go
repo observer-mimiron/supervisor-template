@@ -118,6 +118,11 @@ type ToolConfig struct {
 	Timeout          time.Duration `toml:"-"`
 	MaxRetries       int           `toml:"max_retries"`
 	TimeoutText      string        `toml:"timeout"`
+	// FakeDelayMS makes the fake implementation of this Tool take at least this
+	// long before answering. It only affects fake implementations; real ones
+	// ignore it. A deliberately slow step is what lets an acceptance Case cancel
+	// a Run while it is still executing.
+	FakeDelayMS int `toml:"fake_delay_ms"`
 }
 
 // LimitsConfig 固定执行预算的上限。
@@ -192,6 +197,16 @@ type ObservabilityConfig struct {
 
 // Load 从 TOML 文件加载配置，再应用环境变量覆盖并执行启动校验。
 func Load(path string) (Config, error) {
+	return load(path, false)
+}
+
+// LoadWithFake 在环境变量覆盖后、启动校验前固定使用本地 fake 模型。
+// 这是 cmd/server -fake 的最后模型覆盖，不改变其他配置字段。
+func LoadWithFake(path string) (Config, error) {
+	return load(path, true)
+}
+
+func load(path string, forceFake bool) (Config, error) {
 	var cfg Config
 	if path == "" {
 		return cfg, errors.New("配置文件路径不能为空")
@@ -203,8 +218,12 @@ func Load(path string) (Config, error) {
 	if unknown := metadata.Undecoded(); len(unknown) > 0 {
 		return cfg, fmt.Errorf("配置包含未识别字段: %s", formatUndecodedKeys(unknown))
 	}
-	if err := cfg.applyEnvironment(); err != nil {
+	if err := cfg.applyEnvironment(forceFake); err != nil {
 		return cfg, err
+	}
+	if forceFake {
+		cfg.Model.Provider = "fake"
+		cfg.Model.Name = "fake-model"
 	}
 	if err := cfg.parseDurations(); err != nil {
 		return cfg, err
@@ -292,12 +311,6 @@ func (c Config) Validate() error {
 		}
 	}
 	for workerID, worker := range c.Agent.Workers {
-		if worker.Enabled && !((workerID == "user_analysis" && worker.Implementation == "fake.user_analysis") || (workerID == "user_summary" && worker.Implementation == "fake.user_summary") || (workerID == "mysql_order" && worker.Implementation == "gorm.mysql_order")) {
-			return fmt.Errorf("Worker %q 实现未注册", workerID)
-		}
-		if worker.Enabled && worker.Runner != "" && worker.Runner != "single_tool" && worker.Runner != "eino_adk" {
-			return fmt.Errorf("Worker %q Runner %q 未注册", workerID, worker.Runner)
-		}
 		if worker.Enabled && worker.Timeout <= 0 {
 			return fmt.Errorf("Worker %q timeout 必须大于 0", workerID)
 		}
@@ -340,8 +353,8 @@ func (c Config) Validate() error {
 		}
 	}
 	for toolID, tool := range c.Tools {
-		if tool.Enabled && tool.Implementation != "fake.user_query" && tool.Implementation != "fake.user_summary_query" && tool.Implementation != "fake.simulated_outreach" && tool.Implementation != "http.read_only" && tool.Implementation != "mcp.read_only" && tool.Implementation != "gorm.mysql_order_query" && tool.Implementation != "gorm.mysql_order_insert" {
-			return fmt.Errorf("Tool %q 实现未注册", toolID)
+		if tool.FakeDelayMS < 0 {
+			return fmt.Errorf("Tool %q fake_delay_ms 不能为负", toolID)
 		}
 		if tool.Enabled && (tool.Implementation == "gorm.mysql_order_query" || tool.Implementation == "gorm.mysql_order_insert") && !c.MySQL.Enabled {
 			return fmt.Errorf("Tool %q 使用 MySQL 但 mysql.enabled 未开启", toolID)
@@ -438,18 +451,23 @@ func validEnvName(name string) bool {
 }
 
 // applyEnvironment 只覆盖文档约定的部署字段，避免环境变量改变安全注册表。
-func (c *Config) applyEnvironment() error {
+func (c *Config) applyEnvironment(forceFake bool) error {
 	if value := os.Getenv("LISTEN_ADDR"); value != "" {
 		c.Server.ListenAddr = value
 	}
 	if value := os.Getenv("LOG_LEVEL"); value != "" {
 		c.Observability.LogLevel = value
 	}
-	if value := os.Getenv("MODEL_PROVIDER"); value != "" {
-		c.Model.Provider = value
+	modelOverride := os.Getenv("MODEL_PROVIDER")
+	if modelOverride != "" {
+		c.Model.Provider = modelOverride
 	}
-	if value := os.Getenv("LLM_MODEL"); value != "" {
-		c.Model.Name = value
+	modelNameOverride := os.Getenv("LLM_MODEL")
+	if modelNameOverride != "" {
+		c.Model.Name = modelNameOverride
+	}
+	if modelOverride == "fake" && modelNameOverride == "" {
+		c.Model.Name = "fake-model"
 	}
 	if value := os.Getenv("LLM_BASE_URL"); value != "" {
 		c.Model.BaseURL = value
@@ -511,7 +529,8 @@ func (c *Config) applyEnvironment() error {
 	if value := os.Getenv("FAKE_MODEL"); value != "" {
 		if enabled, err := strconv.ParseBool(value); err == nil && enabled {
 			c.Model.Provider = "fake"
-		} else if err != nil {
+			c.Model.Name = "fake-model"
+		} else if err != nil && !forceFake {
 			return fmt.Errorf("FAKE_MODEL 不是布尔值: %w", err)
 		}
 	}

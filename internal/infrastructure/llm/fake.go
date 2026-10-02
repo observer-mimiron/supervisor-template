@@ -9,7 +9,6 @@ import (
 
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
-	"github.com/observer-mimiron/supervisor-template/internal/infrastructure/examplebusiness"
 )
 
 // FakeRoute 是 fake Supervisor 使用的配置路由快照。
@@ -24,32 +23,26 @@ type FakeRoute struct {
 // FakeSupervisor 根据用户消息生成稳定候选路由，不生成权限、审批结果或终态。
 type FakeSupervisor struct {
 	routes []FakeRoute
+	build  func(conversation.ExecutionRequest, string, string, string, agent.Risk) agent.SupervisorDecision
 }
-
-const fixedAudienceQuery = "{\"as_of\":\"2026-09-25\"}"
-const fixedAudienceProjection = "{\"count\":4,\"customer_ids\":[\"cust-001\",\"cust-002\",\"cust-006\",\"cust-008\"],\"spend_365d_total\":6200}"
-const fixedOrderQuery = "{\"user_id\":1}"
-const fixedOrderInsert = "{\"user_id\":1,\"product_id\":1,\"quantity\":1,\"total_amount\":\"19.90\"}"
 
 // NewFakeSupervisor 创建确定性 fake Supervisor。
 func NewFakeSupervisor(routes ...FakeRoute) *FakeSupervisor {
 	if len(routes) == 0 {
-		for _, route := range examplebusiness.Routes() {
-			routes = append(routes, FakeRoute{
-				WorkerID: route.WorkerID,
-				Intent:   route.Intent,
-				Matches:  append([]string(nil), route.Matches...),
-				ToolID:   route.ToolID,
-				Risk:     route.Risk,
-			})
-		}
+		routes = []FakeRoute{{ToolID: "not_registered", Risk: agent.RiskReadOnly}}
 	}
+	return NewFakeSupervisorWithBuilder(routes, nil)
+}
+
+// NewFakeSupervisorWithBuilder creates a deterministic Supervisor with an
+// explicit payload/decision builder supplied by composition.
+func NewFakeSupervisorWithBuilder(routes []FakeRoute, build func(conversation.ExecutionRequest, string, string, string, agent.Risk) agent.SupervisorDecision) *FakeSupervisor {
 	cloned := make([]FakeRoute, len(routes))
 	for index, route := range routes {
 		cloned[index] = route
 		cloned[index].Matches = append([]string(nil), route.Matches...)
 	}
-	return &FakeSupervisor{routes: cloned}
+	return &FakeSupervisor{routes: cloned, build: build}
 }
 
 // Decide 将只读问题和模拟触达问题映射到已声明 Tool。
@@ -58,7 +51,8 @@ func (s *FakeSupervisor) Decide(_ context.Context, request conversation.Executio
 	if message == "" {
 		return agent.SupervisorDecision{}, context.Canceled
 	}
-	route := FakeRoute{WorkerID: examplebusiness.WorkerID, Intent: examplebusiness.WorkerID, ToolID: "not_registered", Risk: agent.RiskReadOnly}
+	var route FakeRoute
+	found := false
 	for _, candidate := range s.routes {
 		matched := false
 		for _, match := range candidate.Matches {
@@ -69,48 +63,23 @@ func (s *FakeSupervisor) Decide(_ context.Context, request conversation.Executio
 			}
 		}
 		if matched {
+			found = true
 			break
 		}
 	}
-	if strings.Contains(message, "未知能力") {
-		route.ToolID = "not_registered"
+	if !found && len(s.routes) == 1 && len(s.routes[0].Matches) == 0 {
+		route = s.routes[0]
 	}
-	toolMessage := message
-	switch route.ToolID {
-	case examplebusiness.ReadOnlyToolID:
-		toolMessage = fixedAudienceQuery
-	case examplebusiness.SummaryToolID, examplebusiness.SideEffectToolID:
-		toolMessage = fixedAudienceProjection
-	case examplebusiness.MySQLQueryToolID:
-		toolMessage = fixedOrderQuery
-	case examplebusiness.MySQLInsertToolID:
-		toolMessage = fixedOrderInsert
+	if s.build != nil {
+		return s.build(request, route.WorkerID, route.Intent, route.ToolID, route.Risk), nil
 	}
 	decision := agent.SupervisorDecision{
 		DecisionID: request.RunID + ":decision",
 		WorkerID:   route.WorkerID,
 		Intent:     route.Intent,
-		Arguments:  map[string]string{"tool_id": route.ToolID, "message": toolMessage},
+		Arguments:  map[string]string{"tool_id": route.ToolID, "message": message},
 		Risk:       route.Risk,
 		Confidence: 1,
 	}
-	// The example multi-worker fixture is intentionally explicit and bounded:
-	// it is a serial two-step candidate, never an open-ended model loop.
-	if isSerialExample(message) {
-		first, firstOK := examplebusiness.RouteFor(examplebusiness.ReadOnlyToolID)
-		second, secondOK := examplebusiness.RouteFor(examplebusiness.SummaryToolID)
-		if firstOK && secondOK {
-			decision.Steps = []agent.CandidateStep{
-				{WorkerID: first.WorkerID, Intent: first.Intent, Arguments: map[string]string{"tool_id": first.ToolID, "message": fixedAudienceQuery}, Risk: first.Risk},
-				{WorkerID: second.WorkerID, Intent: second.Intent, Arguments: map[string]string{"tool_id": second.ToolID, "message": fixedAudienceProjection}, Risk: second.Risk},
-			}
-			decision.WorkerID, decision.Intent = first.WorkerID, first.Intent
-			decision.Arguments, decision.Risk = decision.Steps[0].Arguments, decision.Steps[0].Risk
-		}
-	}
 	return decision, nil
-}
-
-func isSerialExample(message string) bool {
-	return (strings.Contains(message, "串行") || strings.Contains(message, "多步骤") || strings.Contains(message, "先") && strings.Contains(message, "再")) && !strings.Contains(message, "未知能力")
 }

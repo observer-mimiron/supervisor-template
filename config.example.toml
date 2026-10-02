@@ -1,5 +1,21 @@
 # Eino Supervisor Template local example.
 # Secrets belong in the environment or a credential provider, never in this file.
+#
+# Configuration precedence:
+#   this TOML -> .env beside this file / declared environment variables
+#   -> `cmd/server -fake` final override (provider=fake, model=fake-model).
+# The default provider below remains DeepSeek. `cmd/eval` forces its local
+# Runtime Runner to fake after loading configuration, even when
+# MODEL_PROVIDER=deepseek is present in the environment.
+#
+# Supported deployment overrides:
+# MODEL_PROVIDER, LLM_MODEL, LLM_BASE_URL, FAKE_MODEL, LISTEN_ADDR,
+# LOG_LEVEL, PERSISTENCE_BACKEND, PERSISTENCE_DIR, MYSQL_ENABLED,
+# MYSQL_DSN_ENV, OTEL_ENABLED, OTEL_EXPORTER_OTLP_ENDPOINT,
+# OTEL_EXPORTER_OTLP_INSECURE, OTEL_SERVICE_NAME, OTEL_EXPORTER_OTLP_HEADERS,
+# LANGFUSE_ENABLED, LANGFUSE_ENDPOINT and LANGFUSE_HEADERS_ENV.
+# FAKE_MODEL/fake-model is a local test label, not a real DeepSeek/GPT/Qwen
+# model name. Fake evaluation results are not real model capability evidence.
 
 [server]
 listen_addr = ":8080"
@@ -88,6 +104,9 @@ endpoint = ""
 risk = "read_only"
 timeout = "5s"
 max_retries = 1
+# 只影响 fake 实现：让这一步保持"仍在执行"，验收用例才能在其中发出取消，
+# 并观察 cancel signal 是否真的接线。真实实现忽略该字段。
+fake_delay_ms = 500
 
 [tools.simulated_outreach]
 enabled = true
@@ -143,3 +162,5 @@ resource_attributes = { environment = "local" }
 langfuse_enabled = false
 langfuse_endpoint = ""
 langfuse_headers_env = "OTEL_EXPORTER_OTLP_HEADERS"
+# Optional cmd/eval score upload reads LANGFUSE_API_URL, LANGFUSE_PUBLIC_KEY and
+# LANGFUSE_SECRET_KEY from the environment; it never makes local evaluation depend on them.

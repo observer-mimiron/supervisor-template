@@ -83,11 +83,12 @@ func TestMySQLRunLeaseContract(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	adapter, err := Open(ctx, dsn, nil)
+	connection, err := Open(ctx, dsn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer adapter.Close()
+	defer connection.Close()
+	adapter := connection.NewRunLeaseAdapter()
 	if err := adapter.AutoMigrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,6 @@ func TestMySQLRunLeaseContract(t *testing.T) {
 	runID := "contract-lease-" + now.Format("20060102150405.000000000")
 	first := application.RunLease{RunID: runID, OwnerToken: "owner-1", ExpiresAt: now.Add(500 * time.Millisecond)}
 	second := application.RunLease{RunID: runID, OwnerToken: "owner-2", ExpiresAt: now.Add(time.Second)}
-	defer adapter.DB().Exec("DELETE FROM run_leases WHERE run_id = ?", runID)
 	claimed, err := adapter.Claim(ctx, first, now)
 	if err != nil || !claimed {
 		t.Fatalf("first claim=%v err=%v", claimed, err)

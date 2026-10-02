@@ -1,10 +1,26 @@
+// Package evaluator turns one immutable Case plus bounded Evidence into a
+// deterministic, replayable verdict: the four hard dimensions (business
+// correctness, architecture boundary, side-effect safety, stability), evidence
+// integrity, optional postconditions, and the JSON/JSONL report envelope.
+//
+// The package only reads Case, Evidence and the entrypoint-owned
+// EvaluationProfile. It never runs the project, never invents or rewrites a
+// scenario from model output, and never authorizes a Tool call, an approval, an
+// idempotency key or a terminal event — those stay in the application. A missing
+// or inconsistent profile or evidence fails closed rather than passing, and any
+// LLM Judge result is advisory metadata that cannot change a deterministic
+// verdict.
 package evaluator
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +29,11 @@ import (
 )
 
 const Version = "2"
+
+// ReportSchemaVersion identifies the shape of the report envelope. Consumers
+// that read a report (baseline comparison, publication) must refuse a version
+// they do not understand instead of interpreting it under newer semantics.
+const ReportSchemaVersion = 2
 
 var defaultRules = []string{"business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"}
 
@@ -38,15 +59,17 @@ type CaseReport struct {
 }
 
 type Report struct {
-	DatasetName    string       `json:"dataset_name"`
-	DatasetVersion string       `json:"dataset_version"`
-	CodeVersion    string       `json:"code_version"`
-	RiskLevel      string       `json:"risk_level,omitempty"`
-	ImpactTags     []string     `json:"impact_tags,omitempty"`
-	GeneratedAt    time.Time    `json:"generated_at"`
-	Passed         int          `json:"passed"`
-	Failed         int          `json:"failed"`
-	Cases          []CaseReport `json:"cases"`
+	ReportSchemaVersion int                    `json:"report_schema_version"`
+	EvaluationProfile   eval.EvaluationProfile `json:"evaluation_profile"`
+	DatasetName         string                 `json:"dataset_name"`
+	DatasetVersion      string                 `json:"dataset_version"`
+	CodeVersion         string                 `json:"code_version"`
+	RiskLevel           string                 `json:"risk_level,omitempty"`
+	ImpactTags          []string               `json:"impact_tags,omitempty"`
+	GeneratedAt         time.Time              `json:"generated_at"`
+	Passed              int                    `json:"passed"`
+	Failed              int                    `json:"failed"`
+	Cases               []CaseReport           `json:"cases"`
 }
 
 func Evaluate(item eval.Case, evidence runner.Evidence) CaseReport {
@@ -77,6 +100,12 @@ func Evaluate(item eval.Case, evidence runner.Evidence) CaseReport {
 			Reason: fmt.Sprintf("invalid evidence: %s", strings.Join(invalid, ",")), EvidenceRef: item.ID,
 		}, invalid[0], "evaluator_rule"))
 	}
+	if item.Postconditions.Database != nil {
+		results = append(results, databasePostcondition(item, evidence))
+	}
+	if item.Postconditions.Logs != nil {
+		results = append(results, diagnosticLogPostcondition(item, evidence))
+	}
 	if missing := missingEvidence(item, evidence); len(missing) > 0 {
 		results = append(results, withFailure(Result{
 			Evaluator: "evidence_contract", Version: Version, Passed: false,
@@ -102,11 +131,46 @@ func Evaluate(item eval.Case, evidence runner.Evidence) CaseReport {
 	return CaseReport{CaseID: item.ID, CaseVersion: item.Version, RunID: evidence.RunID, Passed: passed, Results: results, Evidence: evidence, Failures: failures}
 }
 
+func EvaluateWithProfile(item eval.Case, evidence runner.Evidence, profile eval.EvaluationProfile) CaseReport {
+	if err := profile.Validate(); err != nil {
+		return failedProfileCase(item, evidence, err.Error())
+	}
+	if !reflect.DeepEqual(evidence.Profile, profile) {
+		return failedProfileCase(item, evidence, "evaluation_setup_error: evidence profile does not match report profile")
+	}
+	return Evaluate(item, evidence)
+}
+
+func failedProfileCase(item eval.Case, evidence runner.Evidence, reason string) CaseReport {
+	result := withFailure(Result{Evaluator: "evaluation_setup", Version: Version, Reason: reason, EvidenceRef: item.ID}, "evaluation_setup_error", "evaluator_rule")
+	return CaseReport{CaseID: item.ID, CaseVersion: item.Version, RunID: evidence.RunID, Passed: false, Results: []Result{result}, Evidence: evidence, Failures: []eval.FailureRecord{{CaseID: item.ID, CaseVersion: item.Version, CodeVersion: evidence.CodeVersion, RunID: evidence.RunID, Evaluator: result.Evaluator, EvaluatorVersion: result.Version, FailedAssertion: result.FailedAssertion, EvidenceReference: result.EvidenceRef}}}
+}
+
 func Build(dataset eval.Dataset, codeVersion string, cases []CaseReport) Report {
 	return BuildWithSelection(dataset, codeVersion, eval.Selection{}, cases)
 }
 
 func BuildWithSelection(dataset eval.Dataset, codeVersion string, selection eval.Selection, cases []CaseReport) Report {
+	profile := eval.EvaluationProfile{}
+	for _, item := range cases {
+		if item.Evidence.Profile.Scenario != "" {
+			profile = item.Evidence.Profile
+			break
+		}
+	}
+	for _, item := range cases {
+		if item.Evidence.Profile.Scenario != "" && profile.Scenario != "" && !reflect.DeepEqual(item.Evidence.Profile, profile) {
+			// Mixed profiles are rejected by BuildWithProfile; use the first profile
+			// only for legacy callers that have not yet supplied one explicitly.
+			break
+		}
+	}
+	return BuildWithProfile(dataset, codeVersion, selection, profile, cases)
+}
+
+// BuildWithProfile constructs a report from an entrypoint-owned profile. The
+// legacy builder above remains for callers that have not adopted profiles yet.
+func BuildWithProfile(dataset eval.Dataset, codeVersion string, selection eval.Selection, profile eval.EvaluationProfile, cases []CaseReport) Report {
 	selected, selectionErr := eval.SelectCases(dataset, selection)
 	if selectionErr != nil {
 		// Invalid selection must not turn into an empty, passing report. Fall
@@ -131,9 +195,15 @@ func BuildWithSelection(dataset eval.Dataset, codeVersion string, selection eval
 			continue
 		}
 		seen[key] = true
-		// Re-evaluate from immutable Case + Evidence; never trust a caller's
-		// Passed/Results fields when constructing the gate report.
-		report := Evaluate(item, candidate.Evidence)
+		// Re-evaluate from immutable Case + Evidence; explicit entrypoint
+		// profiles are strict, while the legacy builder remains compatible with
+		// existing callers that have no profile metadata yet.
+		var report CaseReport
+		if profile.Scenario == "" {
+			report = Evaluate(item, candidate.Evidence)
+		} else {
+			report = EvaluateWithProfile(item, candidate.Evidence, profile)
+		}
 		if selectionErr != nil {
 			report = addContractFailure(report, codeVersion, "invalid case selection: "+selectionErr.Error())
 		}
@@ -144,8 +214,13 @@ func BuildWithSelection(dataset eval.Dataset, codeVersion string, selection eval
 			verified = append(verified, failedContractCase(item.ID, item.Version, codeVersion, "missing case report"))
 		}
 	}
-	report := Report{DatasetName: dataset.Name, DatasetVersion: dataset.Version, CodeVersion: codeVersion, RiskLevel: selection.RiskLevel, ImpactTags: append([]string(nil), selection.ImpactTags...), GeneratedAt: time.Now().UTC(), Cases: verified}
-	for _, item := range verified {
+	report := Report{ReportSchemaVersion: ReportSchemaVersion, EvaluationProfile: profile, DatasetName: dataset.Name, DatasetVersion: dataset.Version, CodeVersion: codeVersion, RiskLevel: selection.RiskLevel, ImpactTags: append([]string(nil), selection.ImpactTags...), GeneratedAt: time.Now().UTC(), Cases: verified}
+	if profile.Scenario != "" {
+		if err := profile.Validate(); err != nil {
+			report.Cases = append(report.Cases, failedContractCase("evaluation_profile", "1", codeVersion, "evaluation_setup_error: "+err.Error()))
+		}
+	}
+	for _, item := range report.Cases {
 		if item.Passed {
 			report.Passed++
 		} else {
@@ -224,15 +299,17 @@ func WriteJSONL(path string, report Report) error {
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
 	if err := encoder.Encode(struct {
-		DatasetName    string    `json:"dataset_name"`
-		DatasetVersion string    `json:"dataset_version"`
-		CodeVersion    string    `json:"code_version"`
-		RiskLevel      string    `json:"risk_level,omitempty"`
-		ImpactTags     []string  `json:"impact_tags,omitempty"`
-		GeneratedAt    time.Time `json:"generated_at"`
-		Passed         int       `json:"passed"`
-		Failed         int       `json:"failed"`
-	}{report.DatasetName, report.DatasetVersion, report.CodeVersion, report.RiskLevel, report.ImpactTags, report.GeneratedAt, report.Passed, report.Failed}); err != nil {
+		ReportSchemaVersion int                    `json:"report_schema_version"`
+		EvaluationProfile   eval.EvaluationProfile `json:"evaluation_profile"`
+		DatasetName         string                 `json:"dataset_name"`
+		DatasetVersion      string                 `json:"dataset_version"`
+		CodeVersion         string                 `json:"code_version"`
+		RiskLevel           string                 `json:"risk_level,omitempty"`
+		ImpactTags          []string               `json:"impact_tags,omitempty"`
+		GeneratedAt         time.Time              `json:"generated_at"`
+		Passed              int                    `json:"passed"`
+		Failed              int                    `json:"failed"`
+	}{report.ReportSchemaVersion, report.EvaluationProfile, report.DatasetName, report.DatasetVersion, report.CodeVersion, report.RiskLevel, report.ImpactTags, report.GeneratedAt, report.Passed, report.Failed}); err != nil {
 		return err
 	}
 	for _, item := range report.Cases {
@@ -419,6 +496,82 @@ func sideEffects(item eval.Case, evidence runner.Evidence) Result {
 		passed, failedAssertion = false, "max_writes"
 	}
 	return withFailure(Result{Evaluator: "side_effect_safety", Version: Version, Passed: passed, Reason: fmt.Sprintf("unique tool calls=%d writes=%d", len(seenTools), evidence.FakeWriteCount), EvidenceRef: item.ID}, failedAssertion, "implementation")
+}
+
+func databasePostcondition(item eval.Case, evidence runner.Evidence) Result {
+	expected := item.Postconditions.Database
+	passed := evidence.Database.Available && evidence.Database.Backend == expected.Backend
+	failedAssertion := "database_unavailable"
+	if passed && expected.BeforeOrderCount != nil && evidence.Database.BeforeOrderCount != *expected.BeforeOrderCount {
+		passed, failedAssertion = false, "before_order_count"
+	}
+	if passed && expected.AfterOrderCount != nil && evidence.Database.AfterOrderCount != *expected.AfterOrderCount {
+		passed, failedAssertion = false, "after_order_count"
+	}
+	if passed && len(expected.ExpectedOrders) > 0 && evidence.Database.AfterOrderDigest != expectedOrderDigest(expected.ExpectedOrders) {
+		passed, failedAssertion = false, "after_order_state"
+	}
+	if passed {
+		failedAssertion = ""
+	}
+	reason := fmt.Sprintf("backend=%s before=%d after=%d", evidence.Database.Backend, evidence.Database.BeforeOrderCount, evidence.Database.AfterOrderCount)
+	return withFailure(Result{Evaluator: "database_postcondition", Version: Version, Passed: passed, Reason: reason, EvidenceRef: item.ID}, failedAssertion, "database_state")
+}
+
+func diagnosticLogPostcondition(item eval.Case, evidence runner.Evidence) Result {
+	expected := item.Postconditions.Logs
+	passed := evidence.Logs.Available && evidence.Logs.RedactionPassed
+	failedAssertion := "logs_unavailable"
+	if passed && evidence.Logs.RecordCount < expected.MinRecords {
+		passed, failedAssertion = false, "log_count"
+	}
+	if passed && !containsAll(evidence.Logs.Phases, expected.RequiredPhases) {
+		passed, failedAssertion = false, "log_phase"
+	}
+	if passed && !containsAll(evidence.Logs.ErrorCodes, expected.RequiredErrorCodes) {
+		passed, failedAssertion = false, "log_error_code"
+	}
+	if passed {
+		failedAssertion = ""
+	}
+	reason := fmt.Sprintf("records=%d phases=%v", evidence.Logs.RecordCount, evidence.Logs.Phases)
+	return withFailure(Result{Evaluator: "diagnostic_log_contract", Version: Version, Passed: passed, Reason: reason, EvidenceRef: item.ID}, failedAssertion, "diagnostic_logs")
+}
+
+func expectedOrderDigest(orders []eval.DatabaseOrderExpectation) string {
+	values := append([]eval.DatabaseOrderExpectation(nil), orders...)
+	sort.Slice(values, func(i, j int) bool {
+		left, right := values[i], values[j]
+		if left.UserID != right.UserID {
+			return left.UserID < right.UserID
+		}
+		if left.ProductID != right.ProductID {
+			return left.ProductID < right.ProductID
+		}
+		if left.Quantity != right.Quantity {
+			return left.Quantity < right.Quantity
+		}
+		return left.TotalAmount < right.TotalAmount
+	})
+	data, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
+}
+
+func containsAll(have, want []string) bool {
+	set := make(map[string]bool, len(have))
+	for _, value := range have {
+		set[value] = true
+	}
+	for _, value := range want {
+		if !set[value] {
+			return false
+		}
+	}
+	return true
 }
 
 func approvalBindingKey(data map[string]string) string {
@@ -608,6 +761,10 @@ func evidenceSatisfied(item eval.Case, evidence runner.Evidence, requirement str
 			}
 		}
 		return len(evidence.Events) > 0
+	case "database_state":
+		return evidence.Database.Available
+	case "diagnostic_logs":
+		return evidence.Logs.Available && evidence.Logs.RedactionPassed
 	default:
 		return false
 	}

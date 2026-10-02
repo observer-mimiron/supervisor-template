@@ -7,14 +7,13 @@ import (
 	"testing"
 
 	"github.com/observer-mimiron/supervisor-template/internal/application"
-	"github.com/observer-mimiron/supervisor-template/internal/config"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/identity"
 )
 
 func TestStaticBearerAuthenticatorRequiresConfiguredToken(t *testing.T) {
 	digest := sha256.Sum256([]byte("secret"))
 	t.Setenv("AUTH_TEST_TOKEN", hex.EncodeToString(digest[:]))
-	authenticator := NewStaticBearerAuthenticator([]config.BearerCredential{{TokenSHA256Env: "AUTH_TEST_TOKEN", TenantID: "tenant", SubjectID: "user"}})
+	authenticator := NewStaticBearerAuthenticator([]Credential{{TokenSHA256Env: "AUTH_TEST_TOKEN", TenantID: "tenant", SubjectID: "user"}})
 	subject, err := authenticator.Authenticate(context.Background(), "secret")
 	if err != nil || subject != (identity.Subject{TenantID: "tenant", SubjectID: "user"}) {
 		t.Fatalf("authentication = %#v, %v", subject, err)
