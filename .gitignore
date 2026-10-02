@@ -32,8 +32,12 @@ AGENTS.md
 !.agents/skills/project-feature-evaluation/agents/
 .agents/skills/project-feature-evaluation/agents/*
 !.agents/skills/project-feature-evaluation/agents/openai.yaml
-# Spec Kit workflow and feature artifacts stay local; they are not published.
-.specify/
+# Spec Kit working state stays local. The constitution is the one durable
+# governance file and is published; feature artifacts (specs/) are not.
+.specify/*
+!.specify/memory/
+.specify/memory/*
+!.specify/memory/constitution.md
 specs/
 go.work
 go.work.sum

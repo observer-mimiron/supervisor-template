@@ -1,7 +1,8 @@
 # Progress
 
-> 本地 Spec Kit 工作区 `specs/`（plan、tasks、quickstart 等）与 `.specify/` 一起被 gitignore，
-> 不随模板发布。下文出现的 `specs/...` 路径是编写时的证据指针，在仓库里不可见。
+> 本地 Spec Kit 工作区 `specs/`（Feature Spec、Plan、Tasks 等）不随模板发布；`.specify/` 只发布
+> 唯一宪法 [`memory/constitution.md`](.specify/memory/constitution.md)，其余是机器本地状态。
+> 下文出现的 `specs/...` 路径是编写时的证据指针，在仓库里不可见。
 
 ## 当前阶段
 

@@ -4,7 +4,7 @@
 
 这是一个通用的运营 Agent/Supervisor 参考模板，用来验证有界执行、策略门控、审批、恢复和事件投影的合同。它不包含命理业务，不连接真实客户数据、营销渠道或外部运营平台。
 
-本文件是目录职责和依赖方向的项目事实来源；项目宪法仍是更高优先级的约束。实现、计划和任务必须引用本文件，不得在其他文档中另写一套目录规则。
+本文件是目录职责和依赖方向的项目事实来源；项目宪法（[`.specify/memory/constitution.md`](../.specify/memory/constitution.md)）仍是更高优先级的约束。实现、计划和任务必须引用本文件，不得在其他文档中另写一套目录规则。
 
 ## 固定运行链路
 
@@ -88,7 +88,7 @@
 | `internal/composition/` | 注册表、实现选择、依赖注入和运行装配 | 业务流程、隐式全局状态和绕过合同的快捷调用 |
 | `configs/` | 后续可放部署配置样例；当前 v1 以根目录 `config.example.toml` 为入口，目录可以不存在 | 密钥、运行时代码、业务规则或修改权限上限；新增顶层目录仍须遵守宪法 |
 | `docs/` | 架构、技术基线、数据流和验收说明 | 生产代码、隐式运行规则和与架构事实冲突的副本 |
-| `specs/` | 本地 Spec Kit 工作区：Feature Spec、Plan、Research、Data Model、Contract、Tasks；与 `.specify/` 一起 gitignore，不随模板发布 | 把计划状态写成代码完成，或绕过宪法定义新规则 |
+| `specs/` | 本地 Spec Kit 工作区：Feature Spec、Plan、Research、Data Model、Contract、Tasks；不随模板发布 | 把计划状态写成代码完成，或绕过宪法定义新规则 |
 
 `internal/domain/` 的隔离是硬边界：替换 Gin、Eino、数据库、MCP、模型或 SSE 时，领域合同和含义不能改变。`Manager` 是唯一的运行状态和 `ExecutionPlan` owner；Worker 不能发布最终答复，最终答复必须经过 `Final Guard` 和统一事件投影。
 
