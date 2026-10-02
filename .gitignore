@@ -21,17 +21,6 @@ agent-architecture-references/
 # Local planning and workspace artifacts
 AGENTS.md
 .agents/
-# Keep only the shared feature-evaluation skill versioned.
-!.agents/
-.agents/*
-!.agents/skills/
-.agents/skills/*
-!.agents/skills/project-feature-evaluation/
-.agents/skills/project-feature-evaluation/*
-!.agents/skills/project-feature-evaluation/SKILL.md
-!.agents/skills/project-feature-evaluation/agents/
-.agents/skills/project-feature-evaluation/agents/*
-!.agents/skills/project-feature-evaluation/agents/openai.yaml
 # Spec Kit working state stays local. The constitution is the one durable
 # governance file and is published; feature artifacts (specs/) are not.
 .specify/*
