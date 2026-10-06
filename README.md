@@ -116,7 +116,7 @@ flowchart LR
 
 这里的 supervisor 是**应用层的确定性 supervisor**：`internal/infrastructure/llm/` 把模型输出变成结构化候选（`SupervisorDecision`），授权、计划与终态由 `internal/domain/agent/` 和 `internal/application/run/` 决定。Eino 侧用的是官方推荐的 `adk.ChatModelAgent` + `adk.Runner` + `compose.CheckPointStore`；`adk/prebuilt/supervisor` 未使用（Eino 官方在源码里标注它 NOT RECOMMENDED，建议改用 ChatModelAgent + AgentTool 或 DeepAgent）。
 
-三条全局约束，说一次：**依赖方向固定**（`interfaces → application → domain`，`infrastructure` 通过合同接入，`composition` 只做装配），由 `cmd/archcheck` 强制；**能力只能显式注册**（Worker、Route、Prompt、Runner、Tool、模型 provider 都在启动期冻结，配置只能引用已注册 ID，重复 ID、缺失引用、allow-list 越权、降低审批要求、未注册 provider 都让启动直接失败，禁止反射扫描与 `init()` 自注册）；**每个状态只有一个 owner**（会话归 `conversation`，执行计划与运行状态归 `agent`，审批归 `approval`；checkpoint 只是恢复机制，不是新的状态所有者）。
+三条全局约束：**依赖方向固定**（`interfaces → application → domain`，`infrastructure` 通过合同接入，`composition` 只做装配），由 `cmd/archcheck` 强制；**能力只能显式注册**（Worker、Route、Prompt、Runner、Tool、模型 provider 都在启动期冻结，配置只能引用已注册 ID，重复 ID、缺失引用、allow-list 越权、降低审批要求、未注册 provider 都让启动直接失败，禁止反射扫描与 `init()` 自注册）；**每个状态只有一个 owner**（会话归 `conversation`，执行计划与运行状态归 `agent`，审批归 `approval`；checkpoint 只是恢复机制，不是新的状态所有者）。
 
 **有界执行与可恢复**：每次执行有最大步骤数、调用次数、重试预算、超时和 deadline；取消是协作式语义，不承诺强制终止任意外部进程；恢复走 checkpoint，外部调用已发出但结果未提交时返回 `RUN_OUTCOME_UNKNOWN` 并**禁止自动重试**，等待人工对账；每个 run 只有一个公开终态事件。
 
@@ -124,7 +124,7 @@ flowchart LR
 
 ## AI 编码底座
 
-这一节是本模板区别于普通 demo 的部分：**AI 生成的代码由确定性检查兜底，而不是靠人肉 review 记住所有边界。**
+**AI 生成的代码由确定性检查兜底，而不是靠人肉 review 记住所有边界。**
 
 ### 架构防腐
 
@@ -152,7 +152,7 @@ Case 走的是与线上完全一致的 `/api/chat`、approval、resume、cancel 
 
 输出是一张 `mutation × L0 × L1` 矩阵，两列都要读：`L1` 是验收数据集，`L0` 是 Go 合同测试。白名单与幂等去重两行只有 `L0` 变红，它们在 `L1` **结构性不可达**（豁免与代码证据写在 `eval/coverage.json`），其余五行两层都能抓住。
 
-### 闭环：需求 → 用例 → 报告 → 待办 → 补用例
+### 评测闭环
 
 ```bash
 # 每条 claim 要么指向 Case，要么显式豁免并写明理由
@@ -197,9 +197,23 @@ Go 1.25；Eino v0.9.12（`adk.ChatModelAgent` / `adk.Runner` / `compose.CheckPoi
 
 ---
 
-## 从哪里读细节
+## 项目结构
 
-本仓库只发布这一份 README，架构、评测方法和技术选型都不另外存文档。需要细节时按下面的顺序读源码——**代码和 CI 就是唯一事实来源**：`internal/domain/`（合同与不变量）→ `internal/application/`（运行状态与 `ExecutionPlan` 的唯一 owner）→ `internal/interfaces/http/`（HTTP/SSE 投影）；评测与门禁看 `eval/`（Dataset、Evaluator、Runner、`mutation-gate.sh`）和 `.github/workflows/ci.yml`；可配置项看 `config.example.toml`；替换示例业务看 `internal/infrastructure/examplebusiness/` 与 `internal/infrastructure/llm/provider.go`。
+| 路径 | 内容 |
+| --- | --- |
+| `cmd/server/` | 服务入口：加载配置、装配、启动 HTTP |
+| `cmd/eval/` | 评测 CLI |
+| `cmd/archcheck/` | 检查依赖方向与配置字段消费方 |
+| `internal/domain/` | 领域合同与不变量，不依赖 HTTP、Eino、数据库、MCP、模型或 SSE |
+| `internal/application/` | 用例编排；运行状态与 `ExecutionPlan` 的唯一 owner |
+| `internal/interfaces/http/` | HTTP/SSE 投影 |
+| `internal/infrastructure/` | Eino、模型、Tool、MCP、存储、认证、观测的适配与实现 |
+| `internal/composition/` | 只做注册与装配 |
+| `internal/config/` | 配置解析、校验与默认值 |
+| `eval/` | Dataset、Evaluator、Runner、基线、`mutation-gate.sh` |
+| `prompts/`、`schemas/` | 版本化 Prompt 与结构合同 |
+
+配置字段与环境变量以 `config.example.toml` 为准，合并门禁的实际入口是 `.github/workflows/ci.yml`。
 
 ---
 
