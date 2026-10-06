@@ -278,7 +278,6 @@ func TestEinoSelectedHTTPApprovalAndResumeStayApplicationOwned(t *testing.T) {
 	cfg.Model.Name = "deepseek-chat"
 	cfg.Model.BaseURL = modelServer.URL
 	cfg.Model.APIKeyEnv = "TEST_EINO_LLM_API_KEY"
-	cfg.Agent.Supervisor.PromptFile = filepath.Join("..", "..", "..", "prompts", "supervisor.md")
 	worker := cfg.Agent.Workers["user_analysis"]
 	worker.Runner = "eino_adk"
 	cfg.Agent.Workers["user_analysis"] = worker
@@ -290,7 +289,7 @@ func TestEinoSelectedHTTPApprovalAndResumeStayApplicationOwned(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Close(context.Background())
-	router := NewRouter(app.Run, app.Health, app.Authenticator)
+	router := NewRouter(app.Run, app.Health, app.Authenticator, Options{})
 	dispatcher, ok := app.Health.Dependencies.Runner.(*composition.WorkerRunnerDispatcher)
 	if !ok {
 		t.Fatalf("runner dispatcher = %T", app.Health.Dependencies.Runner)
@@ -445,7 +444,7 @@ func newTestRouterWithApp(t *testing.T) (*gin.Engine, *composition.App) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRouter(app.Run, app.Health, app.Authenticator), app
+	return NewRouter(app.Run, app.Health, app.Authenticator, Options{}), app
 }
 
 func withBearer(request *http.Request) {
@@ -482,5 +481,125 @@ func TestChatProjectsSyntheticAudienceAndSummaryResults(t *testing.T) {
 				t.Fatalf("response missing %q: %s", want, output)
 			}
 		}
+	}
+}
+
+// sseEventData 解析 SSE 响应体，返回指定事件类型的包络数据。
+//
+// 只读 data: 行并做严格 JSON 解析，避免用字符串匹配把"某个事件里出现过这个 ID"
+// 误当成"审批事件绑定到了这一步"。
+func sseEventData(t *testing.T, body string, want agent.EventType) map[string]string {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var envelope EventEnvelope
+		if err := json.Unmarshal([]byte(strings.ReplaceAll(payload, "\\n", "\n")), &envelope); err != nil {
+			continue
+		}
+		if envelope.Type == want {
+			return envelope.Data
+		}
+	}
+	return nil
+}
+
+// TestApprovalHTTPInterfaceCarriesTheStepDimension 覆盖 spec §4 的对外接口变更。
+//
+// 混合计划下审批必须指名写入那一步：省略 step_id 时缺省取当前待审批的步骤，
+// 显式指定时必须是同一步，指错动作要被拒绝而不是"顺手批准别的东西"。
+func TestApprovalHTTPInterfaceCarriesTheStepDimension(t *testing.T) {
+	router := newTestRouter(t)
+	runID := "run-http-mixed"
+	body := `{"conversation_id":"demo","run_id":"` + runID + `","message":"混合：分析目标客群然后触达"}`
+	chatRequest := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body))
+	chatRequest.Header.Set("Content-Type", "application/json")
+	withBearer(chatRequest)
+	chatResponse := httptest.NewRecorder()
+	router.ServeHTTP(chatResponse, chatRequest)
+	if chatResponse.Code != http.StatusOK {
+		t.Fatalf("chat status = %d, body = %s", chatResponse.Code, chatResponse.Body.String())
+	}
+	approvalData := sseEventData(t, chatResponse.Body.String(), agent.ApprovalRequired)
+	if approvalData == nil {
+		t.Fatalf("混合计划必须产生审批事件: %s", chatResponse.Body.String())
+	}
+	sideEffectStep := runID + ":step-2"
+	if approvalData["step_id"] != sideEffectStep || approvalData["tool_id"] != "simulated_outreach" {
+		t.Fatalf("审批事件必须绑定写入步骤 %q，实际 %#v", sideEffectStep, approvalData)
+	}
+	if strings.Contains(chatResponse.Body.String(), "event: completed") {
+		t.Fatal("批准前不得完成")
+	}
+
+	approve := func(stepID string) *httptest.ResponseRecorder {
+		t.Helper()
+		payload := map[string]string{"decision": "approve"}
+		if stepID != "" {
+			payload["step_id"] = stepID
+		}
+		encoded, _ := json.Marshal(payload)
+		request := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/approval", bytes.NewReader(encoded))
+		request.Header.Set("Content-Type", "application/json")
+		withBearer(request)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		return response
+	}
+
+	// 指到只读步骤：必须拒绝，且不得放行写入。
+	if wrong := approve(runID + ":step-1"); wrong.Code == http.StatusOK {
+		t.Fatalf("批准一个不等待审批的步骤应被拒绝，得到 %d: %s", wrong.Code, wrong.Body.String())
+	}
+	resumeAfterWrong := httptest.NewRecorder()
+	resumeRequest := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/resume", nil)
+	withBearer(resumeRequest)
+	router.ServeHTTP(resumeAfterWrong, resumeRequest)
+	if strings.Contains(resumeAfterWrong.Body.String(), "event: completed") {
+		t.Fatalf("指错步骤的批准不得放行写入: %s", resumeAfterWrong.Body.String())
+	}
+
+	// 先只读步骤不应存在审批记录：对它的批准被拒绝即为证据。
+	// 正确的步骤：显式指定应被接受，并在响应里回显 step_id。
+	accepted := approve(sideEffectStep)
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("批准写入步骤失败: %d %s", accepted.Code, accepted.Body.String())
+	}
+	if !strings.Contains(accepted.Body.String(), sideEffectStep) {
+		t.Fatalf("审批响应应回显 step_id: %s", accepted.Body.String())
+	}
+
+	resumeResponse := httptest.NewRecorder()
+	resumeValid := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/resume", nil)
+	withBearer(resumeValid)
+	router.ServeHTTP(resumeResponse, resumeValid)
+	if resumeResponse.Code != http.StatusOK || !strings.Contains(resumeResponse.Body.String(), "event: completed") {
+		t.Fatalf("批准后 resume 应完成: status=%d body=%s", resumeResponse.Code, resumeResponse.Body.String())
+	}
+}
+
+// TestApprovalHTTPInterfaceDefaultsToTheWaitingStep 证明 step_id 省略时仍可用。
+func TestApprovalHTTPInterfaceDefaultsToTheWaitingStep(t *testing.T) {
+	router := newTestRouter(t)
+	runID := "run-http-default-step"
+	body := `{"conversation_id":"demo","run_id":"` + runID + `","message":"模拟触达"}`
+	chatRequest := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body))
+	chatRequest.Header.Set("Content-Type", "application/json")
+	withBearer(chatRequest)
+	chatResponse := httptest.NewRecorder()
+	router.ServeHTTP(chatResponse, chatRequest)
+	if chatResponse.Code != http.StatusOK {
+		t.Fatalf("chat status = %d, body = %s", chatResponse.Code, chatResponse.Body.String())
+	}
+	encoded, _ := json.Marshal(map[string]string{"decision": "approve"})
+	approvalRequest := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/approval", bytes.NewReader(encoded))
+	approvalRequest.Header.Set("Content-Type", "application/json")
+	withBearer(approvalRequest)
+	approvalResponse := httptest.NewRecorder()
+	router.ServeHTTP(approvalResponse, approvalRequest)
+	if approvalResponse.Code != http.StatusOK {
+		t.Fatalf("省略 step_id 的审批应缺省取当前待审批步骤: %d %s", approvalResponse.Code, approvalResponse.Body.String())
 	}
 }

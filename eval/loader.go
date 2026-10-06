@@ -125,6 +125,9 @@ func validateDataset(dataset Dataset) error {
 			if step.Action != "chat_cancel" && step.CancelAfterMS > 0 {
 				return fmt.Errorf("case %q cancel_after_ms is only valid for chat_cancel", item.ID)
 			}
+			if step.StepID != "" && step.Action != "approval" {
+				return fmt.Errorf("case %q step_id is only valid for the approval action", item.ID)
+			}
 		}
 		for _, rule := range item.EvaluatorRules {
 			if !allowedEvaluators[rule] || seenRules[rule] {
@@ -144,7 +147,7 @@ func validateDataset(dataset Dataset) error {
 func containsUnsafeText(item Case) bool {
 	values := []string{item.ID, item.Version, item.BusinessGoal, item.Preconditions.Fixture, item.Preconditions.Subject, item.Timeout, item.IdempotencyKey, item.CleanupPolicy}
 	for _, step := range item.RequestSteps {
-		values = append(values, step.Action, step.Message, step.ConversationID, step.Decision, step.RunID, step.Subject)
+		values = append(values, step.Action, step.Message, step.ConversationID, step.Decision, step.RunID, step.Subject, step.StepID)
 	}
 	values = append(values, item.ImpactTags...)
 	values = append(values, item.EvidenceRequirements...)

@@ -25,6 +25,13 @@ func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{requests: make(map[string]conversation.ExecutionRequest), approvals: make(map[string]approval.Request), plans: make(map[string]agent.ExecutionPlan)}
 }
 
+// approvalKey 用 (run_id, step_id) 组成审批的存储键。
+//
+// 用 NUL 分隔而不是 ":"，因为 step_id 本身形如 "run-1:step-2"，冒号会与分隔符混淆。
+func approvalKey(runID, stepID string) string {
+	return runID + "\x00" + stepID
+}
+
 // SaveRequest 保存一个请求；同一 run_id 不允许换绑另一个请求。
 func (r *MemoryRepository) SaveRequest(request conversation.ExecutionRequest) error {
 	r.mu.Lock()
@@ -44,25 +51,33 @@ func (r *MemoryRepository) GetRequest(runID string) (conversation.ExecutionReque
 	return request, ok
 }
 
-// SaveApproval 保存审批快照，供进程重启后的 resume 继续判断审批状态。
+// SaveApproval 按 (run_id, step_id) 保存审批快照，供进程重启后的 resume 继续判断审批状态。
+//
+// 终态保护只针对**同一个动作**：指纹相同的记录不允许被改写状态（否则一次已拒绝或
+// 已批准的决定可以被就地洗掉）。指纹不同说明这是另一个动作，需要一次属于它自己的
+// 批准——spec §3.1 的"参数变化必须重新审批"正是靠这条落地的。
 func (r *MemoryRepository) SaveApproval(request approval.Request) error {
-	if request.RunID == "" || request.ApprovalID == "" {
+	if request.RunID == "" || request.StepID == "" || request.ApprovalID == "" {
 		return errors.New("审批快照缺少必要字段")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing, ok := r.approvals[request.RunID]; ok && existing.Status != approval.Pending && existing.Status != request.Status {
-		return errors.New("审批终态不可覆盖")
+	key := approvalKey(request.RunID, request.StepID)
+	if existing, ok := r.approvals[key]; ok {
+		sameAction := existing.ActionDigest == request.ActionDigest
+		if sameAction && existing.Status != approval.Pending && existing.Status != request.Status {
+			return errors.New("审批终态不可覆盖")
+		}
 	}
-	r.approvals[request.RunID] = request
+	r.approvals[key] = request
 	return nil
 }
 
-// GetApproval 读取某个 run 的审批快照。
-func (r *MemoryRepository) GetApproval(runID string) (approval.Request, bool) {
+// GetApproval 读取某个 run 指定步骤的审批快照。
+func (r *MemoryRepository) GetApproval(runID, stepID string) (approval.Request, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	request, ok := r.approvals[runID]
+	request, ok := r.approvals[approvalKey(runID, stepID)]
 	return request, ok
 }
 

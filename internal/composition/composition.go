@@ -138,7 +138,7 @@ func New(cfg config.Config) (*App, error) {
 	var logCloser io.Closer
 	var logDegraded error
 	if cfg.Observability.LogFile != "" {
-		fileWriter, writerErr := observability.NewRotatingFileWriter(cfg.Observability.LogFile, cfg.Observability.RotateMaxBytes, cfg.Observability.RotateDaily, cfg.Observability.RetentionFiles)
+		fileWriter, writerErr := observability.NewRotatingFileWriter(cfg.Observability.LogFile, cfg.Observability.RotateMaxBytes, cfg.Observability.RotateDaily, cfg.Observability.RetentionFiles, cfg.Observability.FilePermissions)
 		if writerErr != nil {
 			logDegraded = writerErr
 		} else {
@@ -211,7 +211,7 @@ func New(cfg config.Config) (*App, error) {
 		if err != nil {
 			return nil, err
 		}
-		checkpoints, err = checkpoint.NewFileStore(filepath.Join(cfg.Storage.Dir, "checkpoints"))
+		checkpoints, err = checkpoint.NewFileStore(filepath.Join(cfg.Storage.Dir, "checkpoints"), cfg.Checkpoint.Retention)
 		if err != nil {
 			return nil, err
 		}
@@ -235,13 +235,14 @@ func New(cfg config.Config) (*App, error) {
 	case "fake":
 		supervisor = llm.NewFakeSupervisorWithBuilder(toFakeRoutes(catalog.Routes()), examplebusiness.FakeDecisionBuilder)
 	case "deepseek":
-		instruction, readErr := os.ReadFile(catalog.Supervisor().PromptFile)
+		instruction, readErr := os.ReadFile(cfg.ResolvePath(catalog.Supervisor().PromptFile))
 		if readErr != nil {
 			return nil, fmt.Errorf("读取 Supervisor Prompt 失败: %w", readErr)
 		}
 		supervisor, err = llm.NewDeepSeekSupervisor(context.Background(), llm.ModelOptions{
 			Name: cfg.Model.Name, BaseURL: cfg.Model.BaseURL, APIKeyEnv: cfg.Model.APIKeyEnv,
 			Temperature: cfg.Model.Temperature, MaxTokens: cfg.Model.MaxTokens, Timeout: cfg.Model.Timeout,
+			MaxSteps: catalog.Supervisor().MaxSteps,
 		}, string(instruction))
 		if err != nil {
 			return nil, err
@@ -351,7 +352,7 @@ func New(cfg config.Config) (*App, error) {
 	if budget.Timeout <= 0 {
 		budget.Timeout = 5 * time.Second
 	}
-	policy := agent.NewPolicyGate(workers, contracts)
+	policy := agent.NewPolicyGate(selectPolicyWorkers(workers, catalog.Supervisor().AllowedWorkers), contracts)
 	authCredentials := make([]authinfra.Credential, 0, len(cfg.Auth.Credentials))
 	for _, credential := range cfg.Auth.Credentials {
 		authCredentials = append(authCredentials, authinfra.Credential{
@@ -365,13 +366,13 @@ func New(cfg config.Config) (*App, error) {
 	if realSupervisor, ok := supervisor.(*llm.RealSupervisor); ok {
 		modelProvider = realSupervisor
 	}
-	runnerFactory := NewRunnerFactory(modelProvider, tools, tools, contracts, einoinfra.NewMemoryCheckpointStore())
+	runnerFactory := NewRunnerFactory(modelProvider, tools, tools, contracts, einoinfra.NewMemoryCheckpointStore(), cfg.ResolvePath)
 	runners := make(map[string]application.WorkerRunner)
 	for workerID, worker := range catalog.Workers() {
 		if !worker.Enabled {
 			continue
 		}
-		workerRunner, buildErr := runnerFactory.Build(context.Background(), worker)
+		workerRunner, buildErr := runnerFactory.Build(context.Background(), workerID, worker)
 		if buildErr != nil {
 			return nil, fmt.Errorf("Worker %q Runner 装配失败: %w", workerID, buildErr)
 		}
@@ -382,19 +383,21 @@ func New(cfg config.Config) (*App, error) {
 		return nil, err
 	}
 	deps := application.Dependencies{
-		Repository:    repository,
-		Checkpoint:    checkpoints,
-		EventBus:      events,
-		Leases:        leases,
-		Supervisor:    supervisor,
-		Policy:        policy,
-		RunAuth:       authinfra.OwnerRunAuthorizer{},
-		Runner:        runner,
-		ToolValidator: tools,
-		MemoryStore:   memoryStore,
-		MemoryRead:    memoryStore,
-		Observer:      observation,
-		Budget:        budget,
+		Repository:      repository,
+		Checkpoint:      checkpoints,
+		EventBus:        events,
+		Leases:          leases,
+		Supervisor:      supervisor,
+		Policy:          policy,
+		RunAuth:         authinfra.OwnerRunAuthorizer{},
+		Runner:          runner,
+		ToolValidator:   tools,
+		MemoryStore:     memoryStore,
+		MemoryRead:      memoryStore,
+		ToolRetryLimits: toolRetryLimits(catalog.Tools(), limits.MaxRetries),
+		ApprovalTimeout: cfg.Approval.Timeout,
+		Observer:        observation,
+		Budget:          budget,
 	}
 	snapshot := RuntimeSnapshot{WorkerTools: make(map[string][]string), ToolMetadata: make(map[string]ToolMetadata)}
 	for toolID, tool := range catalog.Tools() {
@@ -488,6 +491,46 @@ func observabilityOptions(cfg config.ObservabilityConfig) observability.Options 
 		RotateMaxBytes: cfg.RotateMaxBytes, RotateDaily: cfg.RotateDaily,
 		RetentionFiles: cfg.RetentionFiles, ResourceAttributes: cfg.ResourceAttributes,
 		LangfuseEnabled: cfg.LangfuseEnabled, LangfuseEndpoint: cfg.LangfuseEndpoint,
-		LangfuseHeadersEnv: cfg.LangfuseHeadersEnv,
+		LangfuseHeadersEnv: cfg.LangfuseHeadersEnv, FileMode: cfg.FilePermissions,
 	}
+}
+
+// selectPolicyWorkers 把 Supervisor 声明的 allowed_workers 变成真实的运行期边界。
+//
+// 名单为空表示不额外收紧（所有已启用 Worker 都可被路由）；名单非空时，Policy Gate
+// 只认识名单内的 Worker，模型提出名单外的 Worker 会被当作未注册而拒绝。
+func selectPolicyWorkers(workers []operation.WorkerContract, allowed []string) []operation.WorkerContract {
+	if len(allowed) == 0 {
+		return workers
+	}
+	permitted := make(map[string]struct{}, len(allowed))
+	for _, workerID := range allowed {
+		permitted[workerID] = struct{}{}
+	}
+	selected := make([]operation.WorkerContract, 0, len(permitted))
+	for _, worker := range workers {
+		if _, ok := permitted[worker.WorkerID]; ok {
+			selected = append(selected, worker)
+		}
+	}
+	return selected
+}
+
+// toolRetryLimits 把每个 Tool 配置的重试上限解析成运行期表。
+//
+// 未配置的 Tool 不出现在表中，运行期回落到 limits.max_retries；显式配置的值优先，
+// 因此可以给写操作单独设成 0（永不重试）。负数视为回落全局值。
+func toolRetryLimits(tools map[string]config.ToolConfig, fallback int) map[string]int {
+	limits := make(map[string]int)
+	for toolID, tool := range tools {
+		if tool.MaxRetries == nil {
+			continue
+		}
+		value := *tool.MaxRetries
+		if value < 0 {
+			value = fallback
+		}
+		limits[toolID] = value
+	}
+	return limits
 }

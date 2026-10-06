@@ -8,7 +8,7 @@ import (
 )
 
 func TestLoadSyntheticDataset(t *testing.T) {
-	dataset, err := Load(filepath.Join("datasets", "synthetic-operations-v2.json"))
+	dataset, err := Load(filepath.Join("datasets", "synthetic-operations-v4.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

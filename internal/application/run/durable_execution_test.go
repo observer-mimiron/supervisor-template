@@ -42,11 +42,34 @@ func TestServiceLeaseRejectsCompetingStart(t *testing.T) {
 	}
 }
 
+// retryRunBusy 重试因租约被其他 owner 占用而失败的调用。
+//
+// 并发控制操作里"输掉租约竞争"是**设计行为**：claimLease 返回 RUN_BUSY（HTTP 409），
+// 表示该 Run 正由其他 owner 处理，调用方应当重试而不是把它当成失败。租约续期与排队
+// 属于延期范围，因此"重试"就是当前契约下的正确用法。
+//
+// 竞争本身不是被测对象；被测对象是"无论谁先拿到租约，终态都唯一、副作用都不重复"。
+// 不重试会让断言依赖线程调度（曾实测到 200 次出现 1 次 0 终态），那样的门禁不可信。
+func retryRunBusy(ctx context.Context, call func() error) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := call()
+		var runErr *Error
+		if !errors.As(err, &runErr) || runErr.Code != agent.ErrorRunBusy {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestConcurrentApproveResumeCancelUsesSingleLease(t *testing.T) {
 	service, tools := newTestService()
 	leaseStore := persistence.NewMemoryRunLeaseStore()
 	service.deps.Leases = leaseStore
-	runID, err := service.Start(context.Background(), request("run-control-race", "模拟触达示例用户"))
+	runID, err := service.Start(context.Background(), request("run-control-race", "模拟触达"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,16 +78,22 @@ func TestConcurrentApproveResumeCancelUsesSingleLease(t *testing.T) {
 	errs := make(chan error, 3)
 	done := make(chan struct{}, 3)
 	go func() {
-		errs <- service.Approve(context.Background(), testSubject(), runID, "approve")
+		errs <- retryRunBusy(context.Background(), func() error {
+			return service.Approve(context.Background(), testSubject(), runID, "", "approve")
+		})
 		done <- struct{}{}
 	}()
 	go func() {
-		_, err := second.Resume(context.Background(), testSubject(), runID)
-		errs <- err
+		errs <- retryRunBusy(context.Background(), func() error {
+			_, err := second.Resume(context.Background(), testSubject(), runID)
+			return err
+		})
 		done <- struct{}{}
 	}()
 	go func() {
-		errs <- third.Cancel(context.Background(), testSubject(), runID)
+		errs <- retryRunBusy(context.Background(), func() error {
+			return third.Cancel(context.Background(), testSubject(), runID)
+		})
 		done <- struct{}{}
 	}()
 	for range 3 {

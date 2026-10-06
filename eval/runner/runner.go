@@ -61,6 +61,7 @@ type Evidence struct {
 	RepeatVerdictStable    bool                                `json:"repeat_verdict_stable,omitempty"`
 	FakeWriteCount         int                                 `json:"fake_write_count"`
 	CleanupResult          string                              `json:"cleanup_result,omitempty"`
+	CleanupWarning         string                              `json:"cleanup_warning,omitempty"`
 	RegisteredTools        []string                            `json:"registered_tools,omitempty"`
 	WorkerToolAllowList    map[string][]string                 `json:"worker_tool_allow_list,omitempty"`
 	RegisteredToolMetadata map[string]composition.ToolMetadata `json:"registered_tool_metadata,omitempty"`
@@ -244,7 +245,11 @@ func (r *Runner) RunCase(ctx context.Context, item eval.Case) (evidence Evidence
 			}
 		}
 		evidence.FakeWriteCount = writeCount() - startWriteCount
-		if cleanupErr := closeServer(); cleanupErr != nil {
+		cleanupErr, cleanupWarning := closeServer()
+		if cleanupWarning != "" {
+			evidence.CleanupWarning = cleanupWarning
+		}
+		if cleanupErr != nil {
 			evidence.CleanupResult = cleanupErr.Error()
 			if runErr == nil {
 				runErr = cleanupErr
@@ -309,7 +314,11 @@ func (r *Runner) RunCase(ctx context.Context, item eval.Case) (evidence Evidence
 		case "approval":
 			token := tokenForSubject(stepSubject(step, subject), r.Token)
 			_, status, requestErr := retryPreCall(item.RetryBudget, &evidence.Retries, func() (struct{}, int, error) {
-				status, err := postJSON(caseCtx, client, server.URL+"/api/runs/"+runID+"/approval", token, map[string]string{"decision": step.Decision}, headers)
+				payload := map[string]string{"decision": step.Decision}
+				if step.StepID != "" {
+					payload["step_id"] = step.StepID
+				}
+				status, err := postJSON(caseCtx, client, server.URL+"/api/runs/"+runID+"/approval", token, payload, headers)
 				return struct{}{}, status, err
 			})
 			evidence.HTTPStatus = append(evidence.HTTPStatus, status)
@@ -383,7 +392,7 @@ func (r *Runner) RunCase(ctx context.Context, item eval.Case) (evidence Evidence
 	return evidence, nil
 }
 
-func newLocalServer(configPath, token string, enableObservability, captureLogs bool) (*httptest.Server, func() error, func() int, composition.RuntimeSnapshot, func(context.Context) (composition.DatabaseState, error), func() (DiagnosticLogEvidence, error), error) {
+func newLocalServer(configPath, token string, enableObservability, captureLogs bool) (*httptest.Server, func() (error, string), func() int, composition.RuntimeSnapshot, func(context.Context) (composition.DatabaseState, error), func() (DiagnosticLogEvidence, error), error) {
 	if absolute, err := filepath.Abs(configPath); err == nil {
 		configPath = absolute
 	}
@@ -426,13 +435,22 @@ func newLocalServer(configPath, token string, enableObservability, captureLogs b
 		_ = os.RemoveAll(logDir)
 		return nil, nil, nil, composition.RuntimeSnapshot{}, nil, nil, err
 	}
-	server := httptest.NewServer(httpapi.NewRouter(app.Run, app.Health, app.Authenticator))
-	closeServer := func() error {
+	server := httptest.NewServer(httpapi.NewRouter(app.Run, app.Health, app.Authenticator, httpapi.Options{}))
+	closeServer := func() (error, string) {
 		server.Close()
+		// app.Close 覆盖 MySQL 连接、日志文件与观测 provider 的关闭。这些失败是
+		// 宿主进程的关机卫生问题，不是本次 Case 的运行结果：collector 不可达时
+		// exporter flush 必然失败，一旦把它升级成用例错误，一次观测后端故障就会
+		// 让整份验收数据集全红，而业务终态其实完全正确。
+		// observability.Shutdown 的合同同样是"关闭失败只由进程入口记录，不回写业务
+		// 状态"，cmd/server 也据此忽略该错误。因此这里只把警告留在 evidence 里。
+		warning := ""
 		if app.Close != nil {
-			return app.Close(context.Background())
+			if closeErr := app.Close(context.Background()); closeErr != nil {
+				warning = closeErr.Error()
+			}
 		}
-		return nil
+		return closeHarnessResources(logDir), warning
 	}
 	databaseProbe := func(ctx context.Context) (composition.DatabaseState, error) {
 		return app.DatabaseState(ctx)
@@ -440,11 +458,20 @@ func newLocalServer(configPath, token string, enableObservability, captureLogs b
 	var readLogs func() (DiagnosticLogEvidence, error)
 	if captureLogs {
 		readLogs = func() (DiagnosticLogEvidence, error) {
-			defer os.RemoveAll(logDir)
 			return readDiagnosticLogs(logPath)
 		}
 	}
 	return server, closeServer, app.FakeWriteCount, app.RuntimeSnapshot(), databaseProbe, readLogs, nil
+}
+
+// closeHarnessResources 释放 Runner 为一次 Case 创建、且由 Runner 自己拥有的资源。
+// 判定用的是它的结果：这是"测试宿主有没有把自己弄干净"，与宿主连接的外部后端是否
+// 可用无关。日志目录的所有权在这里，readLogs 只读不删，避免两处各自清理。
+func closeHarnessResources(logDir string) error {
+	if logDir == "" {
+		return nil
+	}
+	return os.RemoveAll(logDir)
 }
 
 func databaseEvidence(state composition.DatabaseState, before, available bool) DatabaseEvidence {

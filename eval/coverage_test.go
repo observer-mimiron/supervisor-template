@@ -82,7 +82,7 @@ func TestShippedCoverageMatchesShippedDataset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("shipped coverage does not load: %v", err)
 	}
-	dataset, err := Load(filepath.Join("datasets", "synthetic-operations-v2.json"))
+	dataset, err := Load(filepath.Join("datasets", "synthetic-operations-v4.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

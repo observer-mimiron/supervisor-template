@@ -158,12 +158,15 @@ type RotatingFileWriter struct {
 	maxBytes    int64
 	maxFiles    int
 	rotateDaily bool
+	mode        os.FileMode
 	file        *os.File
 	day         string
 	size        int64
 }
 
-func NewRotatingFileWriter(path string, maxBytes int64, rotateDaily bool, maxFiles int) (*RotatingFileWriter, error) {
+// NewRotatingFileWriter 创建带轮转的观测文件写入器。
+// mode 来自 observability.file_mode；零值使用 0600。
+func NewRotatingFileWriter(path string, maxBytes int64, rotateDaily bool, maxFiles int, mode os.FileMode) (*RotatingFileWriter, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("观测文件路径不能为空")
 	}
@@ -173,7 +176,10 @@ func NewRotatingFileWriter(path string, maxBytes int64, rotateDaily bool, maxFil
 	if maxFiles < 1 {
 		maxFiles = 1
 	}
-	w := &RotatingFileWriter{path: path, maxBytes: maxBytes, maxFiles: maxFiles, rotateDaily: rotateDaily}
+	if mode == 0 {
+		mode = DefaultFileMode
+	}
+	w := &RotatingFileWriter{path: path, maxBytes: maxBytes, maxFiles: maxFiles, rotateDaily: rotateDaily, mode: mode}
 	if err := w.open(); err != nil {
 		return nil, err
 	}
@@ -184,7 +190,7 @@ func (w *RotatingFileWriter) open() error {
 	if err := os.MkdirAll(filepath.Dir(w.path), 0o700); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, w.mode)
 	if err != nil {
 		return err
 	}

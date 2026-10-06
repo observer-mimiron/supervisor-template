@@ -151,7 +151,7 @@ func TestNewFakeOutreachKeepsAudienceProjectionThroughResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := app.Run.Approve(context.Background(), subject, runID, "approve"); err != nil {
+	if err := app.Run.Approve(context.Background(), subject, runID, "", "approve"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.Run.Resume(context.Background(), subject, runID); err != nil {
@@ -180,7 +180,7 @@ func TestHTTPFakeOutreachUsesConfiguredAuthAndCompletesAfterResume(t *testing.T)
 		t.Fatal(err)
 	}
 	defer app.Close(context.Background())
-	server := httptest.NewServer(httpapi.NewRouter(app.Run, app.Health, app.Authenticator))
+	server := httptest.NewServer(httpapi.NewRouter(app.Run, app.Health, app.Authenticator, httpapi.Options{}))
 	defer server.Close()
 	client := server.Client()
 	post := func(path, body string) string {

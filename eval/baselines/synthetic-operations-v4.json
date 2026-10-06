@@ -1,28 +1,40 @@
 {
   "baseline_name": "synthetic-operations",
   "dataset_name": "synthetic-operations",
-  "dataset_version": "2",
+  "dataset_version": "4",
   "evaluator_version": "2",
   "report_schema_version": 2,
-  "approved_at": "2026-10-02T08:37:34.676090666Z",
+  "approved_at": "2026-10-04T07:54:14.176142723Z",
   "cases": [
     {
       "case_id": "boundary-approved-outreach",
       "case_version": "1.0.0",
       "passed": true,
-      "verdict_digest": "de9a95e820f200b128a880d32881f9712a4a2138e85b1470542e8dd0f054843e"
+      "verdict_digest": "1cb259b0931844d7d10df43861cdda1d342c1af7a8de34a64b9a5908883b8587"
     },
     {
       "case_id": "boundary-cancel-outreach",
       "case_version": "1.0.0",
       "passed": true,
-      "verdict_digest": "06899a96db12eb83cb02f420b5b747b0e7eb3b7644f1c6fa45090eb69eb46f2a"
+      "verdict_digest": "6d8954b5f4079b207541f5c4b8dab085487b3b8a8e8f4ac2e9474419e2235ef4"
     },
     {
       "case_id": "boundary-cancel-while-executing",
       "case_version": "1.0.0",
       "passed": true,
       "verdict_digest": "752cd3dc18342f1006da5121eed700faac2a3f03e4d1551b2683653cd4492483"
+    },
+    {
+      "case_id": "boundary-explicit-step-approval",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "4484af036903e156889840f6d5128b0529c63f83d5ce0d59de7bcdac8342e3bb"
+    },
+    {
+      "case_id": "boundary-mixed-plan-approval-binding",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "f466a8cf8da106c770b6576eac470c3768e98b032be1c7a0be71f4df0d5246c4"
     },
     {
       "case_id": "diversity-audience-subject-variant",
@@ -40,13 +52,19 @@
       "case_id": "negative-reject-outreach",
       "case_version": "1.0.0",
       "passed": true,
-      "verdict_digest": "070944da509802459395bd9a5847eb29e996a4cc543f3431b8fee18339cf0bfd"
+      "verdict_digest": "13e7d201d50a8112fbbd22830d9b21e5b94a9baeda8d5db614e9025a1836634f"
     },
     {
       "case_id": "negative-unknown-capability",
       "case_version": "1.0.0",
       "passed": true,
       "verdict_digest": "9dbead98f7f69067e4f80e9e4fa074dc751189e7c3b004630242a4c078752938"
+    },
+    {
+      "case_id": "negative-wrong-step-approval",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "8b2ebea2d5dcf8dedfa39c7f2d8e42f77693add63573ef572c0aa371365ad5c3"
     },
     {
       "case_id": "positive-audience-query",

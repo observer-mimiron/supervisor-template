@@ -31,7 +31,7 @@ import (
 func TestLogRedactsSensitiveFieldsAndRotatesBoundedFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agent.jsonl")
-	writer, err := NewRotatingFileWriter(path, 24, false, 2)
+	writer, err := NewRotatingFileWriter(path, 24, false, 2, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestTraceSnapshotIsAtomicRedactedAndBounded(t *testing.T) {
 		Name: "agent.tool", TraceID: "trace-1", SpanID: "span-1", Status: "ok",
 		Attributes: map[string]string{"tool_id": "mysql_order_query", "payload": "do-not-write", "path": "/tmp/private"},
 	}}
-	if err := WriteTraceSnapshot(path, spans); err != nil {
+	if err := WriteTraceSnapshot(path, spans, 0); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -356,7 +356,7 @@ func TestTraceSnapshotIsAtomicRedactedAndBounded(t *testing.T) {
 
 func TestTraceSnapshotCanBeReadAfterProcessRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "trace.json")
-	if err := WriteTraceSnapshot(path, []TraceSnapshotSpan{{Name: "run.event", TraceID: "trace-1"}}); err != nil {
+	if err := WriteTraceSnapshot(path, []TraceSnapshotSpan{{Name: "run.event", TraceID: "trace-1"}}, 0); err != nil {
 		t.Fatal(err)
 	}
 	spans, err := ReadTraceSnapshot(path)
@@ -371,7 +371,7 @@ func TestTraceSnapshotCanBeReadAfterProcessRestart(t *testing.T) {
 func TestTraceSnapshotRotatesWithRetention(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "trace.json")
-	if err := WriteTraceSnapshot(path, []TraceSnapshotSpan{{Name: "first"}}); err != nil {
+	if err := WriteTraceSnapshot(path, []TraceSnapshotSpan{{Name: "first"}}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := rotateTraceSnapshotIfNeeded(path, 1, false, 2); err != nil {
@@ -380,7 +380,7 @@ func TestTraceSnapshotRotatesWithRetention(t *testing.T) {
 	if _, err := os.Stat(path + ".1"); err != nil {
 		t.Fatalf("rotated snapshot missing: %v", err)
 	}
-	if err := WriteTraceSnapshot(path, []TraceSnapshotSpan{{Name: "second"}}); err != nil {
+	if err := WriteTraceSnapshot(path, []TraceSnapshotSpan{{Name: "second"}}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := rotateTraceSnapshotIfNeeded(path, 1, false, 2); err != nil {

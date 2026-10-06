@@ -20,11 +20,15 @@ type TraceSnapshotSpan struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
-// WriteTraceSnapshot atomically replaces a compact snapshot with mode 0600.
+// WriteTraceSnapshot atomically replaces a compact snapshot.
 // It is a standalone sink so exporter/file failures stay outside business flow.
-func WriteTraceSnapshot(path string, spans []TraceSnapshotSpan) error {
+// mode 来自 observability.file_mode；零值使用 DefaultFileMode。
+func WriteTraceSnapshot(path string, spans []TraceSnapshotSpan, mode os.FileMode) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("trace snapshot path 不能为空")
+	}
+	if mode == 0 {
+		mode = DefaultFileMode
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -56,7 +60,7 @@ func WriteTraceSnapshot(path string, spans []TraceSnapshotSpan) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err
 	}

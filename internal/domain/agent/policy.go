@@ -61,7 +61,9 @@ func (p *PolicyGate) Evaluate(decision SupervisorDecision) (ApprovedRoute, error
 		WorkerID:         worker.WorkerID,
 		AllowedTools:     []string{toolID},
 		ApprovalRequired: tool.Risk == string(RiskSideEffect) || tool.RequiresApproval,
-		PolicyVersion:    "v1",
+		// 动作说明随注册描述一起流经门控，应用层因此不需要知道业务文案。
+		ActionSummary: tool.Summary,
+		PolicyVersion: "v1",
 	}, nil
 }
 

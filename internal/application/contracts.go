@@ -94,11 +94,14 @@ func (e *PreCallError) Unwrap() error {
 }
 
 // Repository 是应用层需要的请求和计划存储合同。
+//
+// 审批按 (run_id, step_id) 存取：一次批准只覆盖一个动作，读取因此必须指名是哪个
+// 步骤。"取这个 run 的那条批准"正是计划级审批的漏洞形状，合同层不再提供这种问法。
 type Repository interface {
 	SaveRequest(conversation.ExecutionRequest) error
 	GetRequest(string) (conversation.ExecutionRequest, bool)
 	SaveApproval(approval.Request) error
-	GetApproval(string) (approval.Request, bool)
+	GetApproval(runID, stepID string) (approval.Request, bool)
 	SavePlan(agent.ExecutionPlan) error
 	GetPlan(string) (agent.ExecutionPlan, bool)
 }
@@ -117,7 +120,7 @@ type CheckpointReader interface {
 // RepositoryReader 可选地暴露持久化读取错误，避免损坏或不兼容快照被当成不存在。
 type RepositoryReader interface {
 	LoadRequest(string) (conversation.ExecutionRequest, bool, error)
-	LoadApproval(string) (approval.Request, bool, error)
+	LoadApproval(runID, stepID string) (approval.Request, bool, error)
 	LoadPlan(string) (agent.ExecutionPlan, bool, error)
 }
 
@@ -312,6 +315,20 @@ type Dependencies struct {
 	MemoryStore   appmemory.Store
 	MemoryRead    appmemory.Retriever
 	Observer      RuntimeObserver
+	// ToolRetryLimits 是按 Tool 解析后的重试上限，由启动装配从配置算出并冻结。
+	// 未列出的 Tool 回落到 ExecutionBudget.MaxRetries；显式配置优先于全局上限。
+	ToolRetryLimits map[string]int
+	// ApprovalTimeout 是待审批 Run 的最长等待时间。到期后 Run 在下一次 Approve/Resume
+	// 时被判定为过期并以失败收尾，不会无限期停在 waiting_approval。
+	ApprovalTimeout time.Duration
+}
+
+// RetryLimitFor 返回某个 Tool 生效的重试上限。
+func (d Dependencies) RetryLimitFor(toolID string) int {
+	if limit, ok := d.ToolRetryLimits[toolID]; ok && limit >= 0 {
+		return limit
+	}
+	return d.Budget.MaxRetries
 }
 
 // HealthService 暴露仅用于启动检查的依赖状态。

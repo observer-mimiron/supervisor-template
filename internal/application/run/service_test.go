@@ -56,7 +56,7 @@ func TestFileBackedServiceRestoresApprovalAcrossRestart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		checkpoints, err := checkpoint.NewFileStore(filepath.Join(dir, "checkpoints"))
+		checkpoints, err := checkpoint.NewFileStore(filepath.Join(dir, "checkpoints"), time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +89,7 @@ func TestFileBackedServiceRestoresApprovalAcrossRestart(t *testing.T) {
 		return NewService(deps), tools
 	}
 	first, _ := newFileService()
-	runID, err := first.Start(context.Background(), request("run-restart", "模拟触达示例用户"))
+	runID, err := first.Start(context.Background(), request("run-restart", "模拟触达"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestFileBackedServiceRestoresApprovalAcrossRestart(t *testing.T) {
 	if _, err := second.Resume(context.Background(), testSubject(), runID); err == nil || !strings.Contains(err.Error(), "审批") {
 		t.Fatalf("restart lost approval state: %v", err)
 	}
-	if err := second.Approve(context.Background(), testSubject(), runID, "approve"); err != nil {
+	if err := second.Approve(context.Background(), testSubject(), runID, "", "approve"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := second.Resume(context.Background(), testSubject(), runID); err != nil {
@@ -486,7 +486,7 @@ func TestCheckpointFailurePreventsRunnerInvocation(t *testing.T) {
 
 func TestApprovalBlocksSideEffectAndRepeatedResumeIsIdempotent(t *testing.T) {
 	service, tools := newTestService()
-	runID, err := service.Start(context.Background(), request("run-side-effect", "模拟触达示例用户"))
+	runID, err := service.Start(context.Background(), request("run-side-effect", "模拟触达"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +500,7 @@ func TestApprovalBlocksSideEffectAndRepeatedResumeIsIdempotent(t *testing.T) {
 	if _, err := service.Resume(context.Background(), testSubject(), runID); err == nil {
 		t.Fatal("expected approval requirement")
 	}
-	if err := service.Approve(context.Background(), testSubject(), runID, "approve"); err != nil {
+	if err := service.Approve(context.Background(), testSubject(), runID, "", "approve"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 10; i++ {
@@ -518,12 +518,12 @@ func TestApprovalWaitDoesNotConsumeExecutionDeadline(t *testing.T) {
 	clock := time.Now()
 	service.now = func() time.Time { return clock }
 	service.deps.Budget = application.ExecutionBudget{MaxPlanSteps: 1, MaxToolCalls: 1, CostBudget: 1, Timeout: time.Second}
-	runID, err := service.Start(context.Background(), request("run-approval-deadline", "模拟触达示例用户"))
+	runID, err := service.Start(context.Background(), request("run-approval-deadline", "模拟触达"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock = clock.Add(2 * time.Second)
-	if err := service.Approve(context.Background(), testSubject(), runID, "approve"); err != nil {
+	if err := service.Approve(context.Background(), testSubject(), runID, "", "approve"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.Resume(context.Background(), testSubject(), runID); err != nil {
@@ -536,11 +536,11 @@ func TestApprovalWaitDoesNotConsumeExecutionDeadline(t *testing.T) {
 
 func TestSideEffectRunEmitsApprovalAuditSequence(t *testing.T) {
 	service, _ := newTestService()
-	runID, err := service.Start(context.Background(), request("run-approval-audit", "模拟触达示例用户"))
+	runID, err := service.Start(context.Background(), request("run-approval-audit", "模拟触达"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Approve(context.Background(), testSubject(), runID, "approve"); err != nil {
+	if err := service.Approve(context.Background(), testSubject(), runID, "", "approve"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.Resume(context.Background(), testSubject(), runID); err != nil {
@@ -558,11 +558,11 @@ func TestSideEffectRunEmitsApprovalAuditSequence(t *testing.T) {
 
 func TestRejectedApprovalNeverCallsSideEffectTool(t *testing.T) {
 	service, tools := newTestService()
-	runID, err := service.Start(context.Background(), request("run-reject", "模拟触达示例用户"))
+	runID, err := service.Start(context.Background(), request("run-reject", "模拟触达"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := service.Approve(context.Background(), testSubject(), runID, "reject"); err != nil {
+	if err := service.Approve(context.Background(), testSubject(), runID, "", "reject"); err != nil {
 		t.Fatal(err)
 	}
 	events := service.Events(runID)
@@ -585,7 +585,7 @@ func TestUnknownCapabilityIsClassifiedAndNeverExecuted(t *testing.T) {
 
 func TestCancelApprovalRunProducesCanceledTerminal(t *testing.T) {
 	service, tools := newTestService()
-	runID, err := service.Start(context.Background(), request("run-cancel", "模拟触达示例用户"))
+	runID, err := service.Start(context.Background(), request("run-cancel", "模拟触达"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,17 +659,17 @@ func TestExistingRunCannotBeReplayedAcrossConversations(t *testing.T) {
 
 func TestRunAccessIsBoundToOwningSubject(t *testing.T) {
 	service, tools := newTestService()
-	runID, err := service.Start(context.Background(), request("run-owner", "模拟触达示例用户"))
+	runID, err := service.Start(context.Background(), request("run-owner", "模拟触达"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	other := identity.Subject{TenantID: "other-tenant", SubjectID: "other-user"}
-	replay := request(runID, "模拟触达示例用户")
+	replay := request(runID, "模拟触达")
 	replay.Subject = other
 	if _, err := service.Start(context.Background(), replay); !hasAccessDenied(err) {
 		t.Fatalf("replay error = %v", err)
 	}
-	if err := service.Approve(context.Background(), other, runID, "approve"); !hasAccessDenied(err) {
+	if err := service.Approve(context.Background(), other, runID, "", "approve"); !hasAccessDenied(err) {
 		t.Fatalf("approval error = %v", err)
 	}
 	if _, err := service.Resume(context.Background(), other, runID); !hasAccessDenied(err) {

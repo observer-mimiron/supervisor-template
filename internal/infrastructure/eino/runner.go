@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -27,14 +28,24 @@ type Runner struct {
 }
 
 // AgentFactory creates one short-lived ADK agent for one approved step.
-// It is the runtime equivalent of Coze's NodeBuilder.Build: config and
-// approved dependencies are converted into one executable node/agent.
+// Config and approved dependencies are converted into one executable
+// node/agent, so a Worker swap never touches the run state machine.
 type AgentFactory struct {
-	model model.ToolCallingChatModel
+	model       model.ToolCallingChatModel
+	instruction string
 }
 
-func NewAgentFactory(chatModel model.ToolCallingChatModel) *AgentFactory {
-	return &AgentFactory{model: chatModel}
+// defaultWorkerInstruction 是 Worker 未声明 prompt_file 时的兜底指令。
+// 配置了 prompt_file 的 Worker 会用它自己的提示词覆盖该默认值。
+const defaultWorkerInstruction = "你是已通过策略审批的 Worker。只能调用提供的工具一次，并且必须使用用户输入中的固定参数。调用完成后直接返回工具结果。"
+
+// NewAgentFactory 创建 Worker 级 Agent 工厂；instruction 为空时使用默认指令。
+func NewAgentFactory(chatModel model.ToolCallingChatModel, instruction string) *AgentFactory {
+	instruction = strings.TrimSpace(instruction)
+	if instruction == "" {
+		instruction = defaultWorkerInstruction
+	}
+	return &AgentFactory{model: chatModel, instruction: instruction}
 }
 
 func (f *AgentFactory) Build(ctx context.Context, request application.WorkerRequest, approved *ApprovedTool) (adk.Agent, error) {
@@ -44,7 +55,7 @@ func (f *AgentFactory) Build(ctx context.Context, request application.WorkerRequ
 	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:        request.WorkerID,
 		Description: request.Intent,
-		Instruction: "你是已通过策略审批的 Worker。只能调用提供的工具一次，并且必须使用用户输入中的固定参数。调用完成后直接返回工具结果。",
+		Instruction: f.instruction,
 		Model:       f.model,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: []tool.BaseTool{approved}},
@@ -63,7 +74,8 @@ func NewRunner(ctx context.Context, agent adk.Agent, store compose.CheckPointSto
 }
 
 // NewAgentRunner builds an ADK runner whose ToolNode invokes the shared Tool route.
-func NewAgentRunner(ctx context.Context, chatModel model.ToolCallingChatModel, store compose.CheckPointStore, contracts []domaintool.Contract, executor application.ToolExecutor, validator application.ToolContractValidator) (*Runner, error) {
+// instruction 是该 Worker 的模型指令（来自配置声明的 prompt_file）。
+func NewAgentRunner(ctx context.Context, chatModel model.ToolCallingChatModel, store compose.CheckPointStore, contracts []domaintool.Contract, executor application.ToolExecutor, validator application.ToolContractValidator, instruction string) (*Runner, error) {
 	if chatModel == nil || store == nil || executor == nil || validator == nil {
 		return nil, errors.New("Eino Agent Runner 依赖未装配")
 	}
@@ -71,7 +83,7 @@ func NewAgentRunner(ctx context.Context, chatModel model.ToolCallingChatModel, s
 	for _, contract := range contracts {
 		byID[contract.ToolID] = contract
 	}
-	runner := &Runner{store: store, factory: NewAgentFactory(chatModel), tools: executor, validator: validator, contracts: byID}
+	runner := &Runner{store: store, factory: NewAgentFactory(chatModel, instruction), tools: executor, validator: validator, contracts: byID}
 	return runner, nil
 }
 

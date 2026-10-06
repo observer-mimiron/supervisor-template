@@ -19,7 +19,12 @@ import (
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
 
-const fileSchemaVersion = 1
+// fileSchemaVersion 是运行快照的格式版本。
+//
+// v2 把单一 Approval 改为按 step_id 索引的 Approvals：一次批准只覆盖一个动作，
+// 一个 run 因此可以有多条审批记录。v1 快照只有一条、无法表达步骤绑定，读取时被
+// 显式拒绝（fail-closed），而不是被静默解释成"这个 run 没有任何批准"。
+const fileSchemaVersion = 2
 
 // FileRepository 将一个 run 的恢复快照保存为单个 JSON 文件。
 type FileRepository struct {
@@ -30,7 +35,7 @@ type FileRepository struct {
 type runRecord struct {
 	SchemaVersion int                            `json:"schema_version"`
 	Request       *conversation.ExecutionRequest `json:"request,omitempty"`
-	Approval      *approval.Request              `json:"approval,omitempty"`
+	Approvals     map[string]*approval.Request   `json:"approvals,omitempty"`
 	Plan          *agent.ExecutionPlan           `json:"plan,omitempty"`
 }
 
@@ -80,9 +85,13 @@ func (r *FileRepository) LoadRequest(runID string) (conversation.ExecutionReques
 	return *record.Request, true, nil
 }
 
-// SaveApproval 保存审批状态，供重启后的 resume 继续使用原审批结果。
+// SaveApproval 按 (run_id, step_id) 保存审批状态，供重启后的 resume 继续使用原审批结果。
+//
+// 终态保护只针对**同一个动作**：指纹相同的记录不允许被改写状态（否则一次已拒绝或
+// 已批准的决定可以被就地洗掉）。指纹不同说明这是另一个动作，需要一次属于它自己的
+// 批准——spec §3.1 的"参数变化必须重新审批"正是靠这条落地的。
 func (r *FileRepository) SaveApproval(request approval.Request) error {
-	if request.RunID == "" || request.ApprovalID == "" {
+	if request.RunID == "" || request.StepID == "" || request.ApprovalID == "" {
 		return errors.New("审批快照缺少必要字段")
 	}
 	r.mu.Lock()
@@ -91,28 +100,35 @@ func (r *FileRepository) SaveApproval(request approval.Request) error {
 	if err != nil {
 		return err
 	}
-	if record.Approval != nil && record.Approval.Status != approval.Pending && record.Approval.Status != request.Status {
-		return errors.New("审批终态不可覆盖")
+	if record.Approvals == nil {
+		record.Approvals = make(map[string]*approval.Request)
 	}
-	record.Approval = &request
+	if existing := record.Approvals[request.StepID]; existing != nil {
+		sameAction := existing.ActionDigest == request.ActionDigest
+		if sameAction && existing.Status != approval.Pending && existing.Status != request.Status {
+			return errors.New("审批终态不可覆盖")
+		}
+	}
+	stored := request
+	record.Approvals[request.StepID] = &stored
 	return r.writeLocked(request.RunID, record)
 }
 
-// GetApproval 读取一个 run 的审批快照。
-func (r *FileRepository) GetApproval(runID string) (approval.Request, bool) {
-	request, ok, _ := r.LoadApproval(runID)
+// GetApproval 读取一个 run 指定步骤的审批快照。
+func (r *FileRepository) GetApproval(runID, stepID string) (approval.Request, bool) {
+	request, ok, _ := r.LoadApproval(runID, stepID)
 	return request, ok
 }
 
 // LoadApproval 读取审批并保留损坏文件和不兼容版本错误。
-func (r *FileRepository) LoadApproval(runID string) (approval.Request, bool, error) {
+func (r *FileRepository) LoadApproval(runID, stepID string) (approval.Request, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	record, err := r.readLocked(runID)
-	if err != nil || record.Approval == nil {
+	if err != nil || record.Approvals[stepID] == nil {
 		return approval.Request{}, false, err
 	}
-	return *record.Approval, true, nil
+	return *record.Approvals[stepID], true, nil
 }
 
 // SavePlan 保存计划，并拒绝把已完成步骤回写为未完成。

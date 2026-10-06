@@ -1,5 +1,5 @@
 {
-  "dataset": "synthetic-operations@2",
+  "dataset": "synthetic-operations@4",
   "notes": [
     "claims 是人工评审过的映射：每条要么指向用例，要么显式豁免并写明理由。",
     "改动用例集或新增 claim 时必须同时更新本文件与 dataset 版本。"
@@ -7,55 +7,89 @@
   "claims": [
     {
       "id": "readonly-query-result",
-      "source": "specs/002-coding-agent-evaluation/spec.md",
+      "source": "requirement: read-only-result-fidelity",
       "statement": "只读客群查询按固定快照返回正确的匿名结果，且不产生任何写入",
-      "cases": ["positive-audience-query", "diversity-audience-subject-variant"]
+      "cases": [
+        "positive-audience-query",
+        "diversity-audience-subject-variant"
+      ]
     },
     {
       "id": "serial-multi-step",
-      "source": "specs/001-eino-supervisor-template/spec.md",
+      "source": "requirement: bounded-serial-plan-handoff",
       "statement": "多步计划按顺序执行，第二步只消费第一步的有界结果",
-      "cases": ["positive-serial-summary"]
+      "cases": [
+        "positive-serial-summary"
+      ]
     },
     {
       "id": "approval-required-before-side-effect",
-      "source": "constitution: III",
+      "source": "principle: bounded-execution-and-explicit-side-effects",
       "statement": "副作用必须经过审批；批准前不执行、不写入；批准后同一幂等键只写一次",
-      "cases": ["boundary-approved-outreach"]
+      "cases": [
+        "boundary-approved-outreach"
+      ]
+    },
+    {
+      "id": "approval-bound-to-the-executing-action",
+      "source": "requirement: approval-bound-to-the-executing-action",
+      "statement": "审批绑定到即将执行的副作用动作：混合计划里只读步骤不产生审批，写入步骤的 tool_call 之前必须存在绑定到它自己 step_id/worker_id/tool_id 的批准",
+      "cases": [
+        "boundary-mixed-plan-approval-binding"
+      ]
+    },
+    {
+      "id": "approval-is-scoped-to-the-requested-step",
+      "source": "requirement: approval-scoped-to-one-action",
+      "statement": "审批必须指名一个动作：显式指定当前待审批步骤被接受；指到不等待审批的步骤被拒绝（4xx），且该批准不得解除门控、不得放行写入",
+      "cases": [
+        "boundary-explicit-step-approval",
+        "negative-wrong-step-approval"
+      ]
     },
     {
       "id": "approval-rejected",
-      "source": "constitution: III",
+      "source": "principle: bounded-execution-and-explicit-side-effects",
       "statement": "审批被拒绝时 Run 以失败收尾且不产生副作用",
-      "cases": ["negative-reject-outreach"]
+      "cases": [
+        "negative-reject-outreach"
+      ]
     },
     {
       "id": "policy-unknown-capability",
-      "source": "constitution: II",
+      "source": "principle: deterministic-policy-owns-authority",
       "statement": "模型提出未注册能力时被 Policy Gate 拒绝",
-      "cases": ["negative-unknown-capability"]
+      "cases": [
+        "negative-unknown-capability"
+      ]
     },
     {
       "id": "input-validation",
-      "source": "constitution: III",
+      "source": "principle: bounded-execution-and-explicit-side-effects",
       "statement": "非法输入被结构化校验拒绝，返回请求错误且不进入执行",
-      "cases": ["negative-invalid-input"]
+      "cases": [
+        "negative-invalid-input"
+      ]
     },
     {
       "id": "cancel-waiting-approval",
-      "source": "constitution: IV",
+      "source": "principle: one-owner-per-state-and-contract",
       "statement": "等待审批中的 Run 被取消后以 canceled 收尾，且不执行副作用",
-      "cases": ["boundary-cancel-outreach"]
+      "cases": [
+        "boundary-cancel-outreach"
+      ]
     },
     {
       "id": "cancel-during-execution",
-      "source": "constitution: IV",
+      "source": "principle: one-owner-per-state-and-contract",
       "statement": "执行中的 Run 收到取消后以 canceled 收尾：证明取消信号真的接线",
-      "cases": ["boundary-cancel-while-executing"]
+      "cases": [
+        "boundary-cancel-while-executing"
+      ]
     },
     {
       "id": "worker-tool-allow-list",
-      "source": "constitution: II",
+      "source": "principle: deterministic-policy-owns-authority",
       "statement": "Worker 只能调用其 allow-list 内的 Tool；已注册但越权的 Tool 被拒绝",
       "cases": [],
       "waived": true,
@@ -63,7 +97,7 @@
     },
     {
       "id": "idempotent-replay-after-interruption",
-      "source": "constitution: III",
+      "source": "principle: bounded-execution-and-explicit-side-effects",
       "statement": "prepared 状态中断后恢复重放同一步时不产生第二次写入",
       "cases": [],
       "waived": true,

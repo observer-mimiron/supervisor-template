@@ -218,12 +218,15 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 		return request.RunID, err
 	}
 	candidates := decisionCandidates(decision)
-	if len(candidates) == 0 || len(candidates) > 2 {
-		_ = s.failLocked(request.RunID, string(agent.ErrorBudgetExceeded), "候选计划最多包含两个有序步骤")
-		return request.RunID, &Error{Code: agent.ErrorBudgetExceeded, Message: "候选计划最多包含两个有序步骤"}
+	if budget := s.budget(); len(candidates) == 0 || len(candidates) > budget.MaxPlanSteps {
+		message := fmt.Sprintf("候选计划超过配置上限 %d 步", budget.MaxPlanSteps)
+		if len(candidates) == 0 {
+			message = "候选计划为空"
+		}
+		_ = s.failLocked(request.RunID, string(agent.ErrorBudgetExceeded), message)
+		return request.RunID, &Error{Code: agent.ErrorBudgetExceeded, Message: message}
 	}
 	steps := make([]agent.PlanStep, 0, len(candidates))
-	approvalRequired := false
 	for index, candidate := range candidates {
 		if candidate.WorkerID == "" || candidate.Intent == "" || candidate.Arguments == nil || candidate.Arguments["tool_id"] == "" || candidate.Arguments["message"] == "" {
 			_ = s.failLocked(request.RunID, string(agent.ErrorPolicyDenied), "候选步骤缺少必要字段")
@@ -243,8 +246,7 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 			return request.RunID, &Error{Code: code, Message: publicPolicyMessage(code)}
 		}
 		stepID := fmt.Sprintf("%s:step-%d", request.RunID, index+1)
-		steps = append(steps, agent.PlanStep{StepID: stepID, WorkerID: candidate.WorkerID, Intent: candidate.Intent, ToolID: route.AllowedTools[0], Input: toolInput(candidate.Arguments), Status: agent.StepPending, IdempotencyKey: stepID})
-		approvalRequired = approvalRequired || route.ApprovalRequired
+		steps = append(steps, agent.PlanStep{StepID: stepID, WorkerID: candidate.WorkerID, Intent: candidate.Intent, ToolID: route.AllowedTools[0], Input: toolInput(candidate.Arguments), Status: agent.StepPending, ApprovalRequired: route.ApprovalRequired, ActionSummary: route.ActionSummary, IdempotencyKey: stepID})
 	}
 	plan, err := agent.NewExecutionPlan(request.RunID+":plan", request.RunID, steps, budget.MaxPlanSteps, s.now().Add(budget.Timeout))
 	if err != nil {
@@ -262,43 +264,9 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 	if err := s.emitLocked(request.RunID, agent.Plan, planData); err != nil {
 		return request.RunID, err
 	}
-	if approvalRequired {
-		s.observe(ctx, application.RuntimeObservation{RunID: request.RunID, Phase: "approval.wait", WorkerID: steps[0].WorkerID, ToolID: steps[0].ToolID})
-		step := &plan.Steps[0]
-		if err := plan.TransitionStep(step.StepID, agent.StepWaitingApproval); err != nil {
-			return request.RunID, err
-		}
-		if err := s.savePlanLocked(plan); err != nil {
-			return request.RunID, err
-		}
-		approvalRecord := approval.Request{
-			ApprovalID:    request.RunID + ":approval",
-			RunID:         request.RunID,
-			StepID:        step.StepID,
-			ActionSummary: "模拟触达示例用户",
-			Risk:          string(agent.RiskSideEffect),
-			Status:        approval.Pending,
-		}
-		if err := s.ensureCurrentLease(); err != nil {
-			return request.RunID, err
-		}
-		if err := s.deps.Repository.SaveApproval(approvalRecord); err != nil {
-			return request.RunID, err
-		}
-		s.approvals[request.RunID] = &approvalRecord
-		if err := s.saveCheckpointLocked(plan, 1); err != nil {
-			return request.RunID, err
-		}
-		if err := s.emitLocked(request.RunID, agent.ApprovalRequired, map[string]string{
-			"approval_id": request.RunID + ":approval",
-			"step_id":     step.StepID,
-			"worker_id":   step.WorkerID,
-			"tool_id":     step.ToolID,
-		}); err != nil {
-			return request.RunID, err
-		}
-		return request.RunID, nil
-	}
+	// 审批不再在这里按计划整体触发：暂停点后移到"该步骤的输入已确定之后"。
+	// 计划构建时后续步骤的输入还是占位符（会被前一步结果改写），此时审批等于
+	// 批准一个当时还不存在的动作。执行推进到该步骤时由 executeLocked 负责。
 	if err := s.executeLocked(ctx, plan); err != nil {
 		return request.RunID, err
 	}
@@ -306,7 +274,11 @@ func (s *Service) Start(ctx context.Context, request conversation.ExecutionReque
 }
 
 // Approve 写入认证主体的审批决定；批准只解除门控，实际 Tool 调用由 Resume 推进。
-func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, decision string) (retErr error) {
+//
+// stepID 是这次批准针对的步骤。为空时取该 Run 当前等待审批的步骤（HTTP 的 step_id
+// 缺省语义）。显式传入时必须正好是当前等待审批的那一步：不允许把批准写给别的步骤，
+// 也不允许给一个没有待审批记录的动作"预授权"。
+func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, stepID, decision string) (retErr error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ctx = ctx
@@ -324,7 +296,28 @@ func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, 
 		}
 		s.lease = application.RunLease{}
 	}()
-	request, ok, err := s.approvalLocked(runID)
+	// 审批按步骤绑定：先由计划解析出当前等待审批的步骤，再读该步骤自己的记录。
+	// 未指定步骤参数时（HTTP step_id 缺省）走的也是这条路径。
+	plan, found, err := s.loadPlan(runID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return &Error{Code: "RUN_NOT_RESUMABLE", Message: "当前执行不等待审批"}
+	}
+	waitingStepID := pendingApprovalStepID(plan)
+	if stepID != "" && stepID != waitingStepID {
+		// 该步骤此刻不等待审批。若它已经有一条终态记录，说明这是对既有决定的重复提交，
+		// 保持"重复审批是幂等 no-op"的既有语义；否则是调用方指错了动作，必须拒绝。
+		if existing, ok, approvalErr := s.approvalLocked(runID, stepID); approvalErr != nil {
+			return approvalErr
+		} else if ok && existing.Status != approval.Pending {
+			return nil
+		}
+		return &Error{Code: "RUN_NOT_RESUMABLE", Message: "该步骤当前不等待审批"}
+	}
+	stepID = waitingStepID
+	request, ok, err := s.approvalLocked(runID, stepID)
 	if err != nil {
 		return err
 	}
@@ -341,6 +334,12 @@ func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, 
 	if request.Status != approval.Pending {
 		return nil
 	}
+	if request.ExpiredBy(s.now(), s.deps.ApprovalTimeout) {
+		if err := s.expireApprovalLocked(&plan, request); err != nil {
+			return err
+		}
+		return &Error{Code: agent.ErrorApprovalRequired, Message: "审批已超时"}
+	}
 	if err := request.Decide(status, subject.SubjectID, s.now()); err != nil {
 		return &Error{Code: "INVALID_REQUEST", Message: err.Error()}
 	}
@@ -352,13 +351,6 @@ func (s *Service) Approve(ctx context.Context, subject identity.Subject, runID, 
 	}
 	if request.Status == approval.Rejected {
 		s.observe(ctx, application.RuntimeObservation{RunID: runID, Phase: "approval.reject"})
-		plan, ok, err := s.loadPlan(runID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return &Error{Code: agent.ErrorRunNotResumable, Message: "执行计划不存在"}
-		}
 		if err := s.terminateLocked(&plan, agent.RunFailed, agent.ErrorPolicyDenied, "审批已拒绝"); err != nil {
 			if _, ok := err.(*Error); !ok {
 				return err
@@ -407,7 +399,7 @@ func (s *Service) Cancel(ctx context.Context, subject identity.Subject, runID st
 	if agent.IsTerminal(plan.Status) {
 		return nil
 	}
-	if request, ok, err := s.approvalLocked(runID); err != nil {
+	if request, ok, err := s.approvalLocked(runID, pendingApprovalStepID(plan)); err != nil {
 		return err
 	} else if ok && request.Status == approval.Pending {
 		_ = request.Decide(approval.Expired, "", s.now())
@@ -480,15 +472,29 @@ func (s *Service) Resume(ctx context.Context, subject identity.Subject, runID st
 	if s.activeRun(runID) != nil {
 		return s.deps.EventBus.Events(runID), &Error{Code: agent.ErrorInvalidState, Message: "执行正在运行"}
 	}
-	approvalRequest, ok, err := s.approvalLocked(runID)
+	approvalRequest, ok, err := s.approvalLocked(runID, pendingApprovalStepID(plan))
 	if err != nil {
 		return nil, err
+	}
+	if ok && approvalRequest.ExpiredBy(s.now(), s.deps.ApprovalTimeout) {
+		if err := s.expireApprovalLocked(&plan, approvalRequest); err != nil {
+			return s.deps.EventBus.Events(runID), err
+		}
+		return s.deps.EventBus.Events(runID), &Error{Code: agent.ErrorApprovalRequired, Message: "审批已超时"}
 	}
 	if ok && approvalRequest.Status == approval.Pending {
 		return nil, &Error{Code: "APPROVAL_REQUIRED", Message: "执行仍等待审批"}
 	}
 	if err := s.executeLocked(ctx, plan); err != nil {
 		return s.deps.EventBus.Events(runID), err
+	}
+	// 推进时可能停在一个**新的**动作上请求审批（首个副作用步骤，或参数已变而重新
+	// 请求）。Resume 的既有合同是"仍等待审批"以 APPROVAL_REQUIRED 报出，调用方据此
+	// 去取新的审批请求；这里保持该合同，不把暂停伪装成成功推进。
+	if waiting, found, err := s.loadPlan(runID); err != nil {
+		return s.deps.EventBus.Events(runID), err
+	} else if found && waiting.Status == agent.RunWaitingApproval {
+		return s.deps.EventBus.Events(runID), &Error{Code: "APPROVAL_REQUIRED", Message: "执行仍等待审批"}
 	}
 	return s.deps.EventBus.Events(runID), nil
 }
@@ -503,20 +509,138 @@ func (s *Service) operationContext() context.Context {
 	return context.Background()
 }
 
-// approvalLocked 先读进程缓存，再从 Repository 恢复审批快照，支持重启后的 resume。
-func (s *Service) approvalLocked(runID string) (*approval.Request, bool, error) {
-	if request := s.approvals[runID]; request != nil {
+// approvalLocked 先读进程缓存，再从 Repository 恢复指定步骤的审批快照，
+// 支持重启后的 resume。缓存与存储同键，避免"读到了别的步骤的批准"。
+//
+// stepID 为空表示"没有可绑定的步骤"，直接按不存在处理：空指针不能退化成
+// "取该 run 的任意一条批准"，否则计划级审批的漏洞会从合同层重新长回来。
+func (s *Service) approvalLocked(runID, stepID string) (*approval.Request, bool, error) {
+	if stepID == "" {
+		return nil, false, nil
+	}
+	if request := s.approvals[approvalCacheKey(runID, stepID)]; request != nil {
 		return request, true, nil
 	}
-	request, ok, err := s.loadApproval(runID)
+	request, ok, err := s.loadApproval(runID, stepID)
 	if err != nil {
 		return nil, false, err
 	}
 	if !ok {
 		return nil, false, nil
 	}
-	s.approvals[runID] = &request
+	s.approvals[approvalCacheKey(runID, stepID)] = &request
 	return &request, true, nil
+}
+
+// pendingApprovalStepID 返回该计划当前等待审批的步骤。
+//
+// 逐个批准（spec §3.2）保证任一时刻至多一个步骤处于 waiting_approval，因此这个
+// 解析是无歧义的；没有这样的步骤时返回空串，调用方按"没有待审批记录"处理。
+func pendingApprovalStepID(plan agent.ExecutionPlan) string {
+	for _, step := range plan.Steps {
+		if step.Status == agent.StepWaitingApproval {
+			return step.StepID
+		}
+	}
+	return ""
+}
+
+// approvalCacheKey 用 (run_id, step_id) 组成进程内审批缓存的键。
+func approvalCacheKey(runID, stepID string) string { return runID + "\x00" + stepID }
+
+// ensureStepApprovalLocked 在推进一个副作用步骤前，确保它**自己**已获批准。
+//
+// 这是动作级审批的唯一门控：审批绑定 (step_id, tool_id, 输入摘要)，因此
+//
+//   - 只读步骤直接放行（FR-003），不产生审批请求；
+//   - 其他步骤的批准、同一 Tool 别的步骤的批准、以及参数已变的旧批准，都不算通过
+//     （FR-002 的"不得复用其他步骤、其他动作或其他参数的批准"）；
+//   - 同一指纹的重试沿用原批准，不重复打扰操作者（spec §3.1）。
+//
+// 返回 paused=true 表示本次调用已经建立了审批请求并把该步骤停在 waiting_approval，
+// 调用方必须结束本次推进。
+func (s *Service) ensureStepApprovalLocked(ctx context.Context, plan *agent.ExecutionPlan, step *agent.PlanStep) (bool, error) {
+	if !step.ApprovalRequired {
+		return false, nil
+	}
+	digest := approval.ComputeActionDigest(step.StepID, step.ToolID, step.Input)
+	existing, found, err := s.approvalLocked(plan.RunID, step.StepID)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		if existing.ExpiredBy(s.now(), s.deps.ApprovalTimeout) {
+			return false, s.expireApprovalLocked(plan, existing)
+		}
+		if existing.BindsAction(digest) {
+			return false, nil
+		}
+		if existing.Status == approval.Rejected {
+			// 已拒绝的动作不得因为再次推进而复活；终止而不是重新询问。
+			s.observe(ctx, application.RuntimeObservation{RunID: plan.RunID, Phase: "approval.reject", WorkerID: step.WorkerID, ToolID: step.ToolID})
+			return false, s.terminateLocked(plan, agent.RunFailed, agent.ErrorPolicyDenied, "审批已拒绝")
+		}
+		if existing.Status == approval.Expired {
+			return false, s.expireApprovalLocked(plan, existing)
+		}
+	}
+	return true, s.requestStepApprovalLocked(ctx, plan, step, digest, existing, found)
+}
+
+// requestStepApprovalLocked 为该步骤建立（或按新参数重建）审批请求并暂停。
+//
+// 动作摘要来自计划步骤，而计划步骤的 ActionSummary 由 ApprovedRoute 从 Tool 注册
+// 描述投影而来，因此应用层不需要、也不允许知道任何业务文案（FR-005）。
+func (s *Service) requestStepApprovalLocked(ctx context.Context, plan *agent.ExecutionPlan, step *agent.PlanStep, digest string, existing *approval.Request, found bool) error {
+	approvalID := step.StepID + ":approval"
+	record := approval.Request{
+		ApprovalID:    approvalID,
+		RunID:         plan.RunID,
+		StepID:        step.StepID,
+		ToolID:        step.ToolID,
+		ActionDigest:  digest,
+		ActionSummary: step.ActionSummary,
+		Risk:          string(agent.RiskSideEffect),
+		Status:        approval.Pending,
+		RequestedAt:   s.now(),
+	}
+	if found && existing != nil {
+		// 同一 (run, step) 上的旧记录不保留终态：动作指纹已变，说明这是另一个动作，
+		// 需要一次新的、针对新参数的批准。
+		record.ApprovalID = existing.ApprovalID
+	}
+	if step.Status != agent.StepWaitingApproval {
+		if err := plan.TransitionStep(step.StepID, agent.StepWaitingApproval); err != nil {
+			return err
+		}
+	}
+	if err := s.savePlanLocked(*plan); err != nil {
+		return err
+	}
+	if err := s.ensureCurrentLease(); err != nil {
+		return err
+	}
+	if err := s.deps.Repository.SaveApproval(record); err != nil {
+		return err
+	}
+	s.approvals[approvalCacheKey(plan.RunID, step.StepID)] = &record
+	// 每个副作用步骤暂停时都写一次 checkpoint，使重启后仍能恢复"停在哪个动作上"。
+	// 版本必须走与成功路径同一个分配器：暂停点已后移到执行期，因此这时可能已经有
+	// 前序步骤写下的快照，硬编码 1 会与它们冲突。
+	version, err := nextCheckpointVersion(s.deps.Checkpoint, plan.RunID)
+	if err != nil {
+		return err
+	}
+	if err := s.saveCheckpointLocked(*plan, version); err != nil {
+		return err
+	}
+	s.observe(ctx, application.RuntimeObservation{RunID: plan.RunID, Phase: "approval.wait", WorkerID: step.WorkerID, ToolID: step.ToolID})
+	return s.emitLocked(plan.RunID, agent.ApprovalRequired, map[string]string{
+		"approval_id": approvalID,
+		"step_id":     step.StepID,
+		"worker_id":   step.WorkerID,
+		"tool_id":     step.ToolID,
+	})
 }
 
 // executeLocked 执行一个已批准步骤；全局锁保证重复 resume 不会并发触发副作用。
@@ -547,17 +671,19 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 	if step.Status == agent.StepWaitingReconciliation {
 		return &Error{Code: agent.ErrorOutcomeUnknown, Message: "外部执行结果待人工核对"}
 	}
-	if step.Status == agent.StepWaitingApproval {
-		request, ok, err := s.approvalLocked(plan.RunID)
-		if err != nil {
-			return err
-		}
-		if !ok || request.Status != approval.Approved {
-			return &Error{Code: "APPROVAL_REQUIRED", Message: "执行仍等待审批"}
-		}
-		// Approval is an operator wait, not Tool execution. Refresh an expired
-		// execution window after approval so a slow review cannot consume the
-		// bounded Worker/Tool deadline before the side effect starts.
+	// 动作级审批：暂停点在这一步的输入已确定之后。只读步骤不进入这里（FR-003）。
+	paused, err := s.ensureStepApprovalLocked(ctx, &plan, step)
+	if err != nil {
+		return err
+	}
+	if paused {
+		// 本次推进已为该步骤建立审批请求并停在 waiting_approval；
+		// 操作者批准后由 Resume 重新进入本函数。
+		return nil
+	}
+	if step.ApprovalRequired {
+		// 已持有绑定该动作的批准。审批是操作者等待，不是 Tool 执行：刷新执行窗口，
+		// 避免慢审批吃掉有界的 Worker/Tool deadline。
 		if plan.Deadline.IsZero() || !s.now().Before(plan.Deadline) {
 			plan.Deadline = s.now().Add(budget.Timeout)
 			if err := s.savePlanLocked(plan); err != nil {
@@ -700,7 +826,8 @@ func (s *Service) executeLocked(ctx context.Context, plan agent.ExecutionPlan) e
 		}
 		var preCall *application.PreCallError
 		if errors.As(err, &preCall) {
-			if policy.Classify(err, application.PhasePreCall) == application.ErrorPreCallFailure && policy.Decide(application.ErrorPreCallFailure, step.Attempts, budget.MaxRetries) == application.Retry && totalAttempts < attemptLimit {
+			retryLimit := s.deps.RetryLimitFor(step.ToolID)
+			if policy.Classify(err, application.PhasePreCall) == application.ErrorPreCallFailure && policy.Decide(application.ErrorPreCallFailure, step.Attempts, retryLimit) == application.Retry && totalAttempts < attemptLimit {
 				s.observe(toolCtx, application.RuntimeObservation{RunID: plan.RunID, WorkerID: step.WorkerID, ToolID: step.ToolID, Phase: "retry", RetryDecision: string(application.Retry), Attempt: step.Attempts, Duration: time.Since(workerStarted)})
 				step.AttemptStatus = "failed_pre_call"
 				step.ErrorClass = agent.ClassPreCallFailure
@@ -1080,6 +1207,27 @@ func (s *Service) saveCheckpointLocked(plan agent.ExecutionPlan, version int64, 
 	return err
 }
 
+// expireApprovalLocked 把超时的待审批记录标记为过期，并以失败收尾该 Run。
+//
+// 审批超时与审批被拒都收敛到 POLICY_DENIED 终态；两者的区别保留在审批记录的
+// Status 上（expired / rejected），审计不依赖错误码区分。
+func (s *Service) expireApprovalLocked(plan *agent.ExecutionPlan, request *approval.Request) error {
+	_ = request.Decide(approval.Expired, "", s.now())
+	if err := s.ensureCurrentLease(); err != nil {
+		return err
+	}
+	if err := s.deps.Repository.SaveApproval(*request); err != nil {
+		return err
+	}
+	s.observe(s.operationContext(), application.RuntimeObservation{RunID: plan.RunID, Phase: "approval.expired"})
+	if err := s.terminateLocked(plan, agent.RunFailed, agent.ErrorPolicyDenied, "审批已超时"); err != nil {
+		if _, ok := err.(*Error); !ok {
+			return err
+		}
+	}
+	return nil
+}
+
 // failLocked 记录统一终态，避免错误分支各自拼接公开消息。
 func (s *Service) failLocked(runID, code, message string) error {
 	return s.emitLocked(runID, agent.Failed, map[string]string{"code": code, "message": message})
@@ -1205,11 +1353,11 @@ func (s *Service) loadRequest(runID string) (conversation.ExecutionRequest, bool
 	return request, found, nil
 }
 
-func (s *Service) loadApproval(runID string) (approval.Request, bool, error) {
+func (s *Service) loadApproval(runID, stepID string) (approval.Request, bool, error) {
 	if reader, ok := s.deps.Repository.(application.RepositoryReader); ok {
-		return reader.LoadApproval(runID)
+		return reader.LoadApproval(runID, stepID)
 	}
-	request, found := s.deps.Repository.GetApproval(runID)
+	request, found := s.deps.Repository.GetApproval(runID, stepID)
 	return request, found, nil
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "synthetic-operations",
-  "version": "2",
+  "version": "4",
   "description": "Local API/SSE evaluation for the synthetic operations example",
   "cases": [
     {
@@ -203,6 +203,213 @@
       "timeout": "5s",
       "retry_budget": 1,
       "idempotency_key": "eval-diversity-1",
+      "cleanup_policy": "isolated_run"
+    },
+    {
+      "id": "boundary-mixed-plan-approval-binding",
+      "version": "1.0.0",
+      "category": "boundary",
+      "risk_level": "high",
+      "impact_tags": [
+        "approval",
+        "side-effect-binding"
+      ],
+      "business_goal": "只读+写入的混合计划里，审批必须绑定真正要执行的那个写入动作",
+      "preconditions": {
+        "fixture": "synthetic_audience_v1",
+        "subject": "demo-user"
+      },
+      "request_steps": [
+        {
+          "action": "chat",
+          "message": "混合：分析目标客群然后触达",
+          "conversation_id": "eval-mixed-binding-1"
+        },
+        {
+          "action": "approval",
+          "decision": "approve"
+        },
+        {
+          "action": "resume"
+        }
+      ],
+      "expected_results": {
+        "terminal": "completed",
+        "event_types": [
+          "started",
+          "decision",
+          "plan",
+          "progress",
+          "tool_call",
+          "progress",
+          "text",
+          "approval_required",
+          "progress",
+          "tool_call",
+          "progress",
+          "text",
+          "completed"
+        ]
+      },
+      "forbidden_side_effects": {
+        "tool_ids": [],
+        "max_writes": 1
+      },
+      "evidence_requirements": [
+        "events",
+        "tool_calls",
+        "approval",
+        "run_state",
+        "trace_correlation",
+        "cleanup",
+        "http_statuses",
+        "sequence"
+      ],
+      "evaluator_rules": [
+        "business_correctness@1",
+        "architecture_boundary@1",
+        "side_effect_safety@1",
+        "stability@1"
+      ],
+      "timeout": "5s",
+      "retry_budget": 0,
+      "idempotency_key": "eval-mixed-binding-1",
+      "cleanup_policy": "isolated_run"
+    },
+    {
+      "id": "boundary-explicit-step-approval",
+      "version": "1.0.0",
+      "category": "boundary",
+      "risk_level": "high",
+      "impact_tags": [
+        "approval",
+        "explicit-step"
+      ],
+      "business_goal": "显式指定步骤的审批被接受，并且只放行该步骤",
+      "preconditions": {
+        "fixture": "synthetic_audience_v1",
+        "subject": "demo-user"
+      },
+      "request_steps": [
+        {
+          "action": "chat",
+          "message": "混合：分析目标客群然后触达",
+          "conversation_id": "eval-explicit-step-1"
+        },
+        {
+          "action": "approval",
+          "decision": "approve",
+          "step_id": "boundary-explicit-step-approval:step-2"
+        },
+        {
+          "action": "resume"
+        }
+      ],
+      "expected_results": {
+        "terminal": "completed",
+        "event_types": [
+          "started",
+          "decision",
+          "plan",
+          "progress",
+          "tool_call",
+          "progress",
+          "text",
+          "approval_required",
+          "progress",
+          "tool_call",
+          "progress",
+          "text",
+          "completed"
+        ]
+      },
+      "forbidden_side_effects": {
+        "tool_ids": [],
+        "max_writes": 1
+      },
+      "evidence_requirements": [
+        "events",
+        "tool_calls",
+        "approval",
+        "run_state",
+        "trace_correlation",
+        "cleanup",
+        "http_statuses",
+        "sequence"
+      ],
+      "evaluator_rules": [
+        "business_correctness@1",
+        "architecture_boundary@1",
+        "side_effect_safety@1",
+        "stability@1"
+      ],
+      "timeout": "5s",
+      "retry_budget": 0,
+      "idempotency_key": "eval-explicit-step-1",
+      "cleanup_policy": "isolated_run"
+    },
+    {
+      "id": "negative-wrong-step-approval",
+      "version": "1.0.0",
+      "category": "negative",
+      "risk_level": "high",
+      "impact_tags": [
+        "approval",
+        "explicit-step"
+      ],
+      "business_goal": "把批准写给一个不等待审批的步骤会被拒绝，且不产生写入",
+      "preconditions": {
+        "fixture": "synthetic_audience_v1",
+        "subject": "demo-user"
+      },
+      "request_steps": [
+        {
+          "action": "chat",
+          "message": "混合：分析目标客群然后触达",
+          "conversation_id": "eval-wrong-step-1"
+        },
+        {
+          "action": "approval",
+          "decision": "approve",
+          "step_id": "negative-wrong-step-approval:step-1"
+        },
+        {
+          "action": "resume"
+        }
+      ],
+      "expected_results": {
+        "terminal": "request_error",
+        "event_types": [
+          "started",
+          "decision",
+          "plan",
+          "progress",
+          "tool_call",
+          "progress",
+          "text",
+          "approval_required"
+        ]
+      },
+      "forbidden_side_effects": {
+        "tool_ids": [],
+        "max_writes": 0
+      },
+      "evidence_requirements": [
+        "approval",
+        "tool_calls",
+        "http_statuses",
+        "trace_correlation",
+        "cleanup"
+      ],
+      "evaluator_rules": [
+        "business_correctness@1",
+        "architecture_boundary@1",
+        "side_effect_safety@1",
+        "stability@1"
+      ],
+      "timeout": "5s",
+      "retry_budget": 0,
+      "idempotency_key": "eval-wrong-step-1",
       "cleanup_policy": "isolated_run"
     },
     {

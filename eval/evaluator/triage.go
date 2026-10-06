@@ -34,7 +34,7 @@ type TriageItem struct {
 	RegressionObligation string `json:"regression_obligation"`
 }
 
-const regressionObligation = "add or extend a Case that fails without this fix, and prove it with ./eval/mutation-gate.sh (inject the fault, expect the Case to turn red); record the evidence in PROGRESS.md"
+const regressionObligation = "add or extend a Case that fails without this fix, and prove it with ./eval/mutation-gate.sh (inject the fault, expect the Case to turn red); record the run output with the change"
 
 // suspects maps a failure taxonomy to where to look first. It is deliberately
 // small and stable: a triage that guesses widely is worse than no triage.

@@ -16,17 +16,17 @@ tmp/
 .idea/
 .vscode/
 .codegraph/
-agent-architecture-references/
 
-# Local planning and workspace artifacts
+# Local planning and workspace artifacts. The published repository ships the
+# code, its tests, eval assets and this file's neighbours only: README, LICENSE,
+# config.example.toml, docker-compose.yml. Everything below stays on the machine
+# that produced it, so a new working document is unpublished by default instead
+# of by remembering to exclude it.
 AGENTS.md
 .agents/
-# Spec Kit working state stays local. The constitution is the one durable
-# governance file and is published; feature artifacts (specs/) are not.
-.specify/*
-!.specify/memory/
-.specify/memory/*
-!.specify/memory/constitution.md
+.specify/
 specs/
+docs/
+PROGRESS.md
 go.work
 go.work.sum

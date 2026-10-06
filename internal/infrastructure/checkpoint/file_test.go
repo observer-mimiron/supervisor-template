@@ -14,7 +14,7 @@ import (
 
 func TestFileStorePersistsAcrossInstancesAndUsesAtomicFiles(t *testing.T) {
 	dir := t.TempDir()
-	first, err := NewFileStore(dir)
+	first, err := NewFileStore(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestFileStorePersistsAcrossInstancesAndUsesAtomicFiles(t *testing.T) {
 	if _, err := first.Save(snapshot); err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewFileStore(dir)
+	second, err := NewFileStore(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestFileStorePersistsAcrossInstancesAndUsesAtomicFiles(t *testing.T) {
 
 func TestFileStoreRejectsUnsupportedVersionAndCorruptFile(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewFileStore(dir)
+	store, err := NewFileStore(dir, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

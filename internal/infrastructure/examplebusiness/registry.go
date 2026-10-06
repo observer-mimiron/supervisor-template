@@ -137,14 +137,17 @@ func RouteFor(id string) (Route, bool) {
 }
 
 // ToolContracts 返回当前实现选择下的安全合同。
+//
+// Summary 是审批请求与审计记录里给人看的动作说明：审批文案属于业务注册描述，
+// 因此只能在这里定义，应用层不得硬编码业务文案。
 func ToolContracts(readOnlyImplementation string) []domaintool.Contract {
 	if readOnlyImplementation == "" {
 		readOnlyImplementation = ReadOnlyToolFake
 	}
 	return []domaintool.Contract{
-		{ToolID: ReadOnlyToolID, Implementation: readOnlyImplementation, Risk: string(agent.RiskReadOnly), RetryLimit: 1, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
-		{ToolID: SummaryToolID, Implementation: SummaryToolFake, Risk: string(agent.RiskReadOnly), RetryLimit: 1, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
-		{ToolID: SideEffectToolID, Implementation: SideEffectToolFake, Risk: string(agent.RiskSideEffect), RequiresApproval: true, IdempotencyRequired: true, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
+		{ToolID: ReadOnlyToolID, Implementation: readOnlyImplementation, Risk: string(agent.RiskReadOnly), RetryLimit: 1, Summary: "只读查询示例客群", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
+		{ToolID: SummaryToolID, Implementation: SummaryToolFake, Risk: string(agent.RiskReadOnly), RetryLimit: 1, Summary: "只读汇总上一步分析结果", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
+		{ToolID: SideEffectToolID, Implementation: SideEffectToolFake, Risk: string(agent.RiskSideEffect), RequiresApproval: true, IdempotencyRequired: true, Summary: "模拟触达示例用户", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
 	}
 }
 
@@ -152,8 +155,8 @@ func ToolContracts(readOnlyImplementation string) []domaintool.Contract {
 func ToolContractsWithMySQL(readOnlyImplementation string) []domaintool.Contract {
 	contracts := ToolContracts(readOnlyImplementation)
 	return append(contracts,
-		domaintool.Contract{ToolID: MySQLQueryToolID, Implementation: MySQLQueryImpl, Risk: string(agent.RiskReadOnly), RetryLimit: 1, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 64 << 10},
-		domaintool.Contract{ToolID: MySQLInsertToolID, Implementation: MySQLInsertImpl, Risk: string(agent.RiskSideEffect), RequiresApproval: true, IdempotencyRequired: true, RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 64 << 10},
+		domaintool.Contract{ToolID: MySQLQueryToolID, Implementation: MySQLQueryImpl, Risk: string(agent.RiskReadOnly), RetryLimit: 1, Summary: "只读查询示例订单", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 64 << 10},
+		domaintool.Contract{ToolID: MySQLInsertToolID, Implementation: MySQLInsertImpl, Risk: string(agent.RiskSideEffect), RequiresApproval: true, IdempotencyRequired: true, Summary: "写入示例订单", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 64 << 10},
 	)
 }
 

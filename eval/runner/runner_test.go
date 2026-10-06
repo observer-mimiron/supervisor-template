@@ -123,6 +123,60 @@ func TestRunCaseStaysFakeWhenEnvironmentSelectsRealProvider(t *testing.T) {
 	}
 }
 
+// 观测是诊断出口：后端不可达时 exporter flush 必然失败，但它是宿主进程的关机卫生
+// 问题，不是本次 Case 的运行结果。之前这个错误被升级成 runErr，于是一次 collector
+// 故障会让整份验收数据集全红（业务终态其实完全正确），失败原因还指向 `cleanup`。
+func TestUnreachableObservabilityBackendDoesNotFailTheCase(t *testing.T) {
+	configPath := observabilityConfig(t, "http://127.0.0.1:9/v1/otlp")
+	runner := NewWithObservability(configPath, "observability-outage-test", DefaultToken)
+	evidence, err := runner.RunCase(context.Background(), readOnlyCase("runner-observability-outage"))
+	if err != nil {
+		t.Fatalf("an unreachable observability backend failed the case: %v", err)
+	}
+	if evidence.Terminal != "completed" {
+		t.Fatalf("terminal=%q, want completed", evidence.Terminal)
+	}
+	if evidence.CleanupResult != "ok" {
+		t.Fatalf("cleanup result=%q, want ok: telemetry shutdown must not decide the verdict", evidence.CleanupResult)
+	}
+	if evidence.CleanupWarning == "" {
+		t.Fatal("exporter shutdown failure was swallowed instead of recorded as a diagnostic warning")
+	}
+}
+
+// observabilityConfig 复制 config.example.toml，只把 [observability] 段改为启用并
+// 指向给定 endpoint，其余配置保持与仓库样例一致。
+func observabilityConfig(t *testing.T, endpoint string) string {
+	t.Helper()
+	raw, err := os.ReadFile("../../config.example.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := ""
+	lines := strings.Split(string(raw), "\n")
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			section = trimmed
+			continue
+		}
+		if section != "[observability]" {
+			continue
+		}
+		switch trimmed {
+		case "enabled = false":
+			lines[index] = "enabled = true"
+		case `endpoint = ""`:
+			lines[index] = `endpoint = "` + endpoint + `"`
+		}
+	}
+	path := filepath.Join(t.TempDir(), "config-observability.toml")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestRunCaseRejectsInvalidCaseContract(t *testing.T) {
 	runner := New("../../config.example.toml", "test", DefaultToken)
 	for _, test := range []struct {
@@ -232,6 +286,7 @@ func TestEvidenceStaysWithinBoundedFields(t *testing.T) {
 		"terminal": true, "error": true, "http_statuses": true, "elapsed_ms": true, "retries": true,
 		"result": true, "failed_step_id": true, "verdict_digest": true, "repeat_checked": true,
 		"repeat_verdict_stable": true, "fake_write_count": true, "cleanup_result": true,
+		"cleanup_warning":  true,
 		"registered_tools": true, "worker_tool_allow_list": true, "registered_tool_metadata": true,
 		"database": true, "logs": true,
 	}

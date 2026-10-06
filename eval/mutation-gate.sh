@@ -20,7 +20,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 ROOT="$(pwd)"
 FILTER="${1:-}"
-DATASET="${DATASET:-./eval/datasets/synthetic-operations-v2.json}"
+DATASET="${DATASET:-./eval/datasets/synthetic-operations-v4.json}"
 CONFIG="${CONFIG:-./config.example.toml}"
 L1_ONLY="${L1_ONLY:-0}"
 
@@ -62,6 +62,10 @@ MUTATIONS=(
   'terminal-uniqueness-off|internal/infrastructure/eventbus/memory.go|if item.Type == Completed || item.Type == Failed || item.Type == Canceled {|if false \&\& (item.Type == Completed || item.Type == Failed || item.Type == Canceled) {'
   'cancel-signal-lost|internal/application/run/service.go|control.cancel()|_ = control.cancel'
   'idempotency-dedupe-off|internal/infrastructure/examplebusiness/fake_runtime.go|if result, ok := r.outreachByKey[idempotencyKey]; ok {|if result, ok := r.outreachByKey[idempotencyKey]; ok \&\& false {'
+  # 动作级审批的判定注入（spec 004 SC-002）：把审批通告的绑定从"即将执行的那一步"
+  # 改回计划级（固定绑 steps[0]）。这正是旧实现的行为，也是 spec §1 记录的原始症状——
+  # 审批事件通告的动作与真正执行的动作不是同一个。修复后混合计划用例必须变红。
+  'approval-plan-level-binding|internal/application/run/service.go|"step_id":     step.StepID,|"step_id":     plan.Steps[0].StepID,'
 )
 
 printf '%-26s %-8s %-8s %s\n' "mutation" "L0" "L1" "result"
@@ -101,7 +105,10 @@ PY
 
   l0="skip"
   if [ "$L1_ONLY" != "1" ]; then
-    if (cd "$ROOT" && go test ./... >"$work/l0.log" 2>&1); then l0="green"; else l0="RED"; fi
+    # 必须用显式包前缀，不能用 ./...：本工作区把 Go module cache 放在仓库内的
+    # tmp/modcache，./... 会递归进去并因"不属于 go.work 列出的模块"而**永远**报错，
+    # 于是 l0 恒为 RED、每一行都会被判成 caught，这一列就失去了证据价值。
+    if (cd "$ROOT" && go test ./cmd/... ./internal/... ./eval/... >"$work/l0.log" 2>&1); then l0="green"; else l0="RED"; fi
   fi
 
   l1="green"

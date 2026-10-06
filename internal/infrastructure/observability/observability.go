@@ -68,6 +68,7 @@ type Runtime struct {
 	traceMaxBytes    int64
 	traceRotateDaily bool
 	traceRetention   int
+	traceFileMode    os.FileMode
 	snapshotMu       sync.Mutex
 	snapshot         []TraceSnapshotSpan
 	degraded         sync.Once
@@ -78,6 +79,9 @@ type Runtime struct {
 }
 
 // Options is the infrastructure-local observability setup contract.
+// DefaultFileMode 是未配置 observability.file_mode 时的观测文件权限。
+const DefaultFileMode os.FileMode = 0o600
+
 type Options struct {
 	Enabled            bool
 	Endpoint           string
@@ -93,6 +97,8 @@ type Options struct {
 	LangfuseEnabled    bool
 	LangfuseEndpoint   string
 	LangfuseHeadersEnv string
+	// FileMode 是观测文件权限，来自 observability.file_mode；零值使用 DefaultFileMode。
+	FileMode os.FileMode
 }
 
 // SetLogger attaches the already-configured process logger without making the
@@ -198,7 +204,7 @@ func Setup(ctx context.Context, cfg Options) (*Runtime, error) {
 			meter:         otel.Meter(instrumentationName),
 			metrics:       cfg.MetricsEnabled,
 			traceFile:     strings.TrimSpace(cfg.TraceFile),
-			traceMaxBytes: cfg.RotateMaxBytes, traceRotateDaily: cfg.RotateDaily, traceRetention: cfg.RetentionFiles,
+			traceMaxBytes: cfg.RotateMaxBytes, traceRotateDaily: cfg.RotateDaily, traceRetention: cfg.RetentionFiles, traceFileMode: cfg.FileMode,
 			shutdown: func(context.Context) error { return nil },
 		}, nil
 	}
@@ -289,7 +295,7 @@ func Setup(ctx context.Context, cfg Options) (*Runtime, error) {
 		meter:         otel.Meter(instrumentationName),
 		metrics:       cfg.MetricsEnabled,
 		traceFile:     strings.TrimSpace(cfg.TraceFile),
-		traceMaxBytes: cfg.RotateMaxBytes, traceRotateDaily: cfg.RotateDaily, traceRetention: cfg.RetentionFiles,
+		traceMaxBytes: cfg.RotateMaxBytes, traceRotateDaily: cfg.RotateDaily, traceRetention: cfg.RetentionFiles, traceFileMode: cfg.FileMode,
 		shutdown: func(shutdownCtx context.Context) error {
 			shutdownErr := provider.Shutdown(shutdownCtx)
 			if meterProvider != nil {
@@ -348,7 +354,7 @@ func (r *Runtime) recordSpan(name string, span trace.Span, attrs map[string]stri
 	if err := rotateTraceSnapshotIfNeeded(r.traceFile, r.traceMaxBytes, r.traceRotateDaily, r.traceRetention); err != nil {
 		r.SignalDegraded(context.Background(), "trace_snapshot_rotation")
 	}
-	if err := WriteTraceSnapshot(r.traceFile, r.snapshot); err != nil {
+	if err := WriteTraceSnapshot(r.traceFile, r.snapshot, r.traceFileMode); err != nil {
 		r.SignalDegraded(context.Background(), "trace_snapshot")
 	}
 }

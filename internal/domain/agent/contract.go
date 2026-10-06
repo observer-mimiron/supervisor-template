@@ -107,24 +107,31 @@ type ApprovedRoute struct {
 	WorkerID         string
 	AllowedTools     []string
 	ApprovalRequired bool
-	PolicyVersion    string
+	// ActionSummary 是注册描述提供的、给人看的动作说明。它只用于展示和审批审计，
+	// MUST NOT 参与授权判断——授权只看 ApprovalRequired 与 PolicyVersion。
+	ActionSummary string
+	PolicyVersion string
 }
 
 // PlanStep 是执行计划中的一个有序步骤。
 type PlanStep struct {
-	StepID         string
-	WorkerID       string
-	Intent         string
-	ToolID         string
-	Input          map[string]string
-	Status         StepStatus
-	Attempts       int
-	IdempotencyKey string
-	ResultDigest   string
-	ResultContent  string
-	AttemptStatus  string
-	ErrorClass     ErrorClass
-	UpdatedAt      time.Time
+	StepID   string
+	WorkerID string
+	Intent   string
+	ToolID   string
+	Input    map[string]string
+	Status   StepStatus
+	// ApprovalRequired 与 ActionSummary 在计划构建时由 ApprovedRoute 投影而来，
+	// 使"这一步是否需要审批"随步骤快照一起持久化，而不是每次重新推导。
+	ApprovalRequired bool
+	ActionSummary    string
+	Attempts         int
+	IdempotencyKey   string
+	ResultDigest     string
+	ResultContent    string
+	AttemptStatus    string
+	ErrorClass       ErrorClass
+	UpdatedAt        time.Time
 }
 
 // ExecutionPlan 是 Manager 所有的有界执行计划。

@@ -75,7 +75,7 @@ func TestApprovedToolUsesSharedExecutorAndRejectsParameterMismatch(t *testing.T)
 func TestAgentRunnerRoutesToolCallingModelThroughApprovedTool(t *testing.T) {
 	executor := &captureToolExecutor{}
 	model := &deterministicToolCallingModel{}
-	runner, err := NewAgentRunner(context.Background(), model, NewMemoryCheckpointStore(), []domaintool.Contract{{ToolID: "user_query", Risk: "read_only", RequiredInputs: []string{"message"}}}, executor, captureToolValidator{})
+	runner, err := NewAgentRunner(context.Background(), model, NewMemoryCheckpointStore(), []domaintool.Contract{{ToolID: "user_query", Risk: "read_only", RequiredInputs: []string{"message"}}}, executor, captureToolValidator{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestEinoSideEffectUsesApprovalBoundaryAndIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 	model := &deterministicToolCallingModel{toolName: "simulated_outreach", arguments: `{"message":"{\"count\":4,\"customer_ids\":[\"cust-001\",\"cust-002\",\"cust-006\",\"cust-008\"],\"spend_365d_total\":6200}"}`}
-	runner, err := NewAgentRunner(context.Background(), model, NewMemoryCheckpointStore(), contracts, registry, registry)
+	runner, err := NewAgentRunner(context.Background(), model, NewMemoryCheckpointStore(), contracts, registry, registry, "")
 	if err != nil {
 		t.Fatal(err)
 	}

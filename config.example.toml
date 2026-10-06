@@ -1,6 +1,9 @@
 # Eino Supervisor Template local example.
 # Secrets belong in the environment or a credential provider, never in this file.
 #
+# 每个可调参数都有默认值，省略即用默认；这里显式写出是为了让部署意图可见。
+# 相对路径的提示词按"本文件所在目录"解析，不依赖启动时的工作目录。
+#
 # Configuration precedence:
 #   this TOML -> .env beside this file / declared environment variables
 #   -> `cmd/server -fake` final override (provider=fake, model=fake-model).
@@ -20,9 +23,14 @@
 [server]
 listen_addr = ":8080"
 read_timeout = "10s"
+# write_timeout 是"两次写之间的空闲上限"，不是整个响应的时长：SSE 由 sse_heartbeat
+# 持续刷新，服务入口不设置 http.Server 的绝对 WriteTimeout，否则会截断长 Run。
 write_timeout = "30s"
 idle_timeout = "60s"
+# 单个请求体的字节上限，/api/chat 与审批接口共用。
 request_body_limit = 1048576
+# Run 超过该间隔仍未结束时，响应立即提交为 SSE 并开始发送心跳注释，
+# 避免长连接被代理或网关按空闲连接切断。
 sse_heartbeat = "15s"
 
 [model]
@@ -56,8 +64,11 @@ subject_id = "demo-user-2"
 enabled = true
 implementation = "eino.chat_model_agent"
 prompt_file = "prompts/supervisor.md"
+# allowed_workers 是真实的运行期边界：Policy Gate 只认识名单内的 Worker，
+# 模型提出名单外的 Worker 会被当作未注册而拒绝。留空表示不额外收紧。
 allowed_workers = ["user_analysis", "user_summary"]
-max_steps = 8
+# max_steps 限制模型一次能提出的候选步骤数；运行期还会叠加 limits.max_plan_steps。
+max_steps = 2
 
 [agent.workers.user_analysis]
 enabled = true
@@ -103,6 +114,7 @@ implementation = "fake.user_query"
 endpoint = ""
 risk = "read_only"
 timeout = "5s"
+# 该 Tool 的重试上限；省略则回落 limits.max_retries。0 表示永不重试。
 max_retries = 1
 # 只影响 fake 实现：让这一步保持"仍在执行"，验收用例才能在其中发出取消，
 # 并观察 cancel signal 是否真的接线。真实实现忽略该字段。
@@ -114,6 +126,7 @@ implementation = "fake.simulated_outreach"
 risk = "side_effect"
 requires_approval = true
 timeout = "5s"
+# 写操作不重试：显式设 0 而不是靠全局上限。
 max_retries = 0
 
 [tools.user_summary_query]
@@ -130,10 +143,12 @@ max_retries = 2
 cost_budget = 1000
 
 [approval]
+# 待审批 Run 的最长等待时间。到期后在下次 Approve/Resume 时判定为过期，
+# 审批记录标记为 expired，Run 以 failed/POLICY_DENIED 收尾。
 timeout = "10m"
-idempotency_window = "24h"
 
 [checkpoint]
+# 超过该时长的 checkpoint 文件会在写入时被顺带清理（机会式回收，无后台协程）。
 retention = "24h"
 
 # Optional local MySQL example. Go still runs on the host; Compose only starts the dependency.
@@ -142,6 +157,13 @@ enabled = false
 dsn_env = "MYSQL_ORDER_DSN"
 auto_migrate = false
 seed = false
+
+[storage]
+# memory：单进程，重启即丢。file：按 run 落盘，支持跨进程恢复。
+# 这一项同时决定 ADK checkpoint 的落点：领域 checkpoint 与 Eino 图状态必须一起持久化，
+# 否则 Resume 时一侧回来了、另一侧取不到。
+backend = "memory"
+dir = "./var/state"
 
 [observability]
 enabled = false
@@ -154,6 +176,7 @@ metrics_enabled = true
 # Optional local evidence. Secrets/Authorization are supplied by environment variables.
 log_file = "./var/agent.log.jsonl"
 trace_file = "./var/agent.trace.jsonl"
+# 观测文件权限。允许 0600 或 0640；拒绝 group/other 可写与 other 可读。
 file_mode = "0600"
 rotate_max_bytes = 10485760
 rotate_daily = true

@@ -25,7 +25,7 @@ func (m fixedChatModel) Generate(context.Context, []*schema.Message, ...einomode
 }
 
 func TestRealSupervisorParsesStructuredDecisionAndOwnsDecisionID(t *testing.T) {
-	supervisor := NewRealSupervisor(fixedChatModel{content: `{"decision_id":"model-controlled","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query","message":"分析"},"risk":"read_only","confidence":0.9}`}, "", time.Second)
+	supervisor := NewRealSupervisor(fixedChatModel{content: `{"decision_id":"model-controlled","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query","message":"分析"},"risk":"read_only","confidence":0.9}`}, "", time.Second, defaultMaxSteps)
 	decision, err := supervisor.Decide(context.Background(), conversation.ExecutionRequest{RunID: "run-1", Message: "分析"})
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func TestParseDecisionRejectsFencesProseAndTrailingData(t *testing.T) {
 		"trailing": base + "\n{}",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := parseDecision(raw); err == nil {
+			if _, err := parseDecision(raw, defaultMaxSteps); err == nil {
 				t.Fatal("expected whole-response rejection")
 			}
 		})
@@ -54,7 +54,7 @@ func TestParseDecisionRejectsFencesProseAndTrailingData(t *testing.T) {
 }
 
 func TestParseDecisionRejectsUnknownFields(t *testing.T) {
-	_, err := parseDecision(`{"decision_id":"d1","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query"},"risk":"read_only","confidence":1,"approval":true}`)
+	_, err := parseDecision(`{"decision_id":"d1","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query"},"risk":"read_only","confidence":1,"approval":true}`, defaultMaxSteps)
 	if err == nil {
 		t.Fatal("expected unknown field rejection")
 	}
@@ -67,7 +67,7 @@ func TestParseDecisionRejectsInvalidRouteShape(t *testing.T) {
 		"invalid-confidence": `{"decision_id":"d1","worker_id":"user_analysis","intent":"query","arguments":{"tool_id":"user_query"},"risk":"read_only","confidence":2}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := parseDecision(raw); err == nil {
+			if _, err := parseDecision(raw, defaultMaxSteps); err == nil {
 				t.Fatal("expected strict route rejection")
 			}
 		})

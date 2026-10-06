@@ -79,6 +79,11 @@ type RequestStep struct {
 	Decision       string `json:"decision,omitempty"`
 	RunID          string `json:"run_id,omitempty"`
 	Subject        string `json:"subject,omitempty"`
+	// StepID is valid only for the approval action: it names the step this
+	// decision applies to. Empty means "the step currently waiting for
+	// approval". Because the Runner keys the Run by the Case id, a Case can
+	// name a step deterministically as "<case id>:step-<n>".
+	StepID string `json:"step_id,omitempty"`
 	// CancelAfterMS is required for the chat_cancel action: how long to wait
 	// before cancelling, measured from the moment the chat request is sent. It
 	// must fall inside the execution window, which is as long as the Tool delay

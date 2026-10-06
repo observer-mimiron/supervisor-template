@@ -26,7 +26,12 @@ type RealSupervisor struct {
 	model       einomodel.ToolCallingChatModel
 	instruction string
 	timeout     time.Duration
+	maxSteps    int
 }
+
+// defaultMaxSteps 是未配置 agent.supervisor.max_steps 时的候选步骤上限。
+// 它与 config 层的同名默认值保持一致：代码里只保留一个兜底常量。
+const defaultMaxSteps = 2
 
 // ModelOptions is the infrastructure-local model configuration needed to
 // create the official DeepSeek adapter.
@@ -37,6 +42,8 @@ type ModelOptions struct {
 	Temperature float64
 	MaxTokens   int
 	Timeout     time.Duration
+	// MaxSteps 是模型一次可以提出的候选步骤上限，来自 agent.supervisor.max_steps。
+	MaxSteps int
 }
 
 // NewDeepSeekSupervisor 创建基于官方 Eino DeepSeek 适配器的 Supervisor。
@@ -63,12 +70,16 @@ func NewDeepSeekSupervisor(ctx context.Context, cfg ModelOptions, instruction st
 	if err != nil {
 		return nil, fmt.Errorf("创建真实 ChatModel 失败: %w", err)
 	}
-	return NewRealSupervisor(chatModel, instruction, cfg.Timeout), nil
+	return NewRealSupervisor(chatModel, instruction, cfg.Timeout, cfg.MaxSteps), nil
 }
 
 // NewRealSupervisor 包装一个已创建的 Eino ToolCallingChatModel，便于合同测试替换模型。
-func NewRealSupervisor(chatModel einomodel.ToolCallingChatModel, instruction string, timeout time.Duration) *RealSupervisor {
-	return &RealSupervisor{model: chatModel, instruction: instruction, timeout: timeout}
+// maxSteps 为零时使用 defaultMaxSteps，保证零值配置也能工作。
+func NewRealSupervisor(chatModel einomodel.ToolCallingChatModel, instruction string, timeout time.Duration, maxSteps int) *RealSupervisor {
+	if maxSteps <= 0 {
+		maxSteps = defaultMaxSteps
+	}
+	return &RealSupervisor{model: chatModel, instruction: instruction, timeout: timeout, maxSteps: maxSteps}
 }
 
 // Model exposes the already-created tool-calling model for Worker adapters.
@@ -102,7 +113,7 @@ func (s *RealSupervisor) Decide(ctx context.Context, request conversation.Execut
 	if output == nil {
 		return agent.SupervisorDecision{}, errors.New("真实模型返回为空")
 	}
-	decision, err := parseDecision(output.Content)
+	decision, err := parseDecision(output.Content, s.maxSteps)
 	if err != nil {
 		return agent.SupervisorDecision{}, err
 	}
@@ -112,7 +123,11 @@ func (s *RealSupervisor) Decide(ctx context.Context, request conversation.Execut
 }
 
 // parseDecision 只接受 SupervisorDecision Schema 的最小 JSON，并拒绝含糊的自然语言输出。
-func parseDecision(raw string) (agent.SupervisorDecision, error) {
+// maxSteps 来自配置，决定模型一次能提出多少候选步骤；非正值使用 defaultMaxSteps。
+func parseDecision(raw string, maxSteps int) (agent.SupervisorDecision, error) {
+	if maxSteps <= 0 {
+		maxSteps = defaultMaxSteps
+	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return agent.SupervisorDecision{}, errors.New("真实模型输出不是合法 JSON")
@@ -159,8 +174,8 @@ func parseDecision(raw string) (agent.SupervisorDecision, error) {
 		Risk:       payload.Risk,
 		Confidence: payload.Confidence,
 	}
-	if len(payload.Steps) > 2 {
-		return agent.SupervisorDecision{}, errors.New("真实模型候选步骤超过两个")
+	if len(payload.Steps) > maxSteps {
+		return agent.SupervisorDecision{}, fmt.Errorf("真实模型候选步骤超过配置上限 %d", maxSteps)
 	}
 	for _, step := range payload.Steps {
 		if step.WorkerID == "" || step.Intent == "" || step.Arguments == nil || step.Arguments["tool_id"] == "" || step.Arguments["message"] == "" || (step.Risk != agent.RiskReadOnly && step.Risk != agent.RiskSideEffect) {

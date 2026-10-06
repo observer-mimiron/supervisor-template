@@ -54,7 +54,7 @@ var newCaseRunner = func(configPath, codeVersion string, observability bool) *ru
 func run(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("eval", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	datasetPath := flags.String("dataset", "./eval/datasets/synthetic-operations-v2.json", "dataset path")
+	datasetPath := flags.String("dataset", "./eval/datasets/synthetic-operations-v4.json", "dataset path")
 	reportPath := flags.String("report", "./tmp/eval-report.json", "report path")
 	jsonlPath := flags.String("jsonl", "", "optional JSONL report path")
 	codeVersion := flags.String("code-version", "dev", "code version")

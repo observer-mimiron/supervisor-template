@@ -2,6 +2,8 @@ package composition
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,8 +16,8 @@ import (
 )
 
 func TestRunnerFactoryBuildsSingleToolRunner(t *testing.T) {
-	factory := NewRunnerFactory(nil, fakeExecutor{}, fakeValidator{}, nil, nil)
-	runner, err := factory.Build(context.Background(), config.WorkerConfig{Runner: "single_tool"})
+	factory := NewRunnerFactory(nil, fakeExecutor{}, fakeValidator{}, nil, nil, nil)
+	runner, err := factory.Build(context.Background(), "worker", config.WorkerConfig{Runner: "single_tool"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,24 +44,38 @@ func TestWorkerRunnerDispatcherRoutesByWorkerID(t *testing.T) {
 }
 
 func TestRunnerFactoryRejectsIncompleteEinoWiring(t *testing.T) {
-	factory := NewRunnerFactory(nil, fakeExecutor{}, fakeValidator{}, nil, nil)
-	if _, err := factory.Build(context.Background(), config.WorkerConfig{Runner: examplebusiness.EinoRunnerID}); err == nil || !strings.Contains(err.Error(), "ToolCallingChatModel") {
+	factory := NewRunnerFactory(nil, fakeExecutor{}, fakeValidator{}, nil, nil, nil)
+	if _, err := factory.Build(context.Background(), "worker", config.WorkerConfig{Runner: examplebusiness.EinoRunnerID}); err == nil || !strings.Contains(err.Error(), "ToolCallingChatModel") {
 		t.Fatalf("missing model error = %v", err)
 	}
-	factory = NewRunnerFactory(modelProviderStub{model: stubChatModel{}}, fakeExecutor{}, fakeValidator{}, nil, nil)
-	if _, err := factory.Build(context.Background(), config.WorkerConfig{Runner: examplebusiness.EinoRunnerID}); err == nil || !strings.Contains(err.Error(), "checkpoint") {
+	factory = NewRunnerFactory(modelProviderStub{model: stubChatModel{}}, fakeExecutor{}, fakeValidator{}, nil, nil, nil)
+	if _, err := factory.Build(context.Background(), "worker", config.WorkerConfig{Runner: examplebusiness.EinoRunnerID}); err == nil || !strings.Contains(err.Error(), "checkpoint") {
 		t.Fatalf("missing checkpoint error = %v", err)
 	}
 }
 
 func TestRunnerFactoryBuildsEinoRunnerWithApprovedDependencies(t *testing.T) {
-	factory := NewRunnerFactory(modelProviderStub{model: stubChatModel{}}, fakeExecutor{}, fakeValidator{}, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake), einoinfra.NewMemoryCheckpointStore())
-	runner, err := factory.Build(context.Background(), config.WorkerConfig{Runner: examplebusiness.EinoRunnerID})
+	factory := NewRunnerFactory(modelProviderStub{model: stubChatModel{}}, fakeExecutor{}, fakeValidator{}, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake), einoinfra.NewMemoryCheckpointStore(), nil)
+	promptFile := filepath.Join(t.TempDir(), "worker.md")
+	if err := os.WriteFile(promptFile, []byte("你是测试 Worker。"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := factory.Build(context.Background(), "worker", config.WorkerConfig{Runner: examplebusiness.EinoRunnerID, PromptFile: promptFile})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := runner.(*einoinfra.Runner); !ok {
 		t.Fatalf("runner type = %T, want *eino.Runner", runner)
+	}
+}
+
+// TestRunnerFactoryRejectsUnreadableWorkerPrompt 证明 prompt_file 真的被读取：
+// 文件缺失时装配失败，而不是悄悄退回硬编码指令。
+func TestRunnerFactoryRejectsUnreadableWorkerPrompt(t *testing.T) {
+	factory := NewRunnerFactory(modelProviderStub{model: stubChatModel{}}, fakeExecutor{}, fakeValidator{}, examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolFake), einoinfra.NewMemoryCheckpointStore(), nil)
+	_, err := factory.Build(context.Background(), "worker", config.WorkerConfig{Runner: examplebusiness.EinoRunnerID, PromptFile: filepath.Join(t.TempDir(), "missing.md")})
+	if err == nil || !strings.Contains(err.Error(), "Prompt") {
+		t.Fatalf("missing prompt file must fail the build, got %v", err)
 	}
 }
 

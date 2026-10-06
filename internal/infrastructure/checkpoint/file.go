@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 )
@@ -42,9 +43,14 @@ func (s *FileStore) GetWithContext(ctx context.Context, runID string) (agent.Che
 const fileSchemaVersion = 1
 
 // FileStore 保存每个 run 的最新 Checkpoint JSON 快照。
+//
+// retention 决定快照的保留时长，来自 checkpoint.retention。清理是机会式的：在写入时
+// 顺带扫描并删除过期文件，因此不需要额外的后台协程或生命周期管理。零值表示不清理。
 type FileStore struct {
-	mu  sync.Mutex
-	dir string
+	mu         sync.Mutex
+	dir        string
+	retention  time.Duration
+	lastPruned time.Time
 }
 
 type checkpointRecord struct {
@@ -53,14 +59,50 @@ type checkpointRecord struct {
 }
 
 // NewFileStore 创建文件版 checkpoint 存储。
-func NewFileStore(dir string) (*FileStore, error) {
+func NewFileStore(dir string, retention time.Duration) (*FileStore, error) {
 	if dir == "" {
 		return nil, errors.New("checkpoint 目录不能为空")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建 checkpoint 目录失败: %w", err)
 	}
-	return &FileStore{dir: dir}, nil
+	return &FileStore{dir: dir, retention: retention}, nil
+}
+
+// pruneLocked 删除超过保留期的快照文件。
+//
+// 清理失败不影响恢复主链路：快照仍然是最新的，只是磁盘回收推迟到下一次写入。
+// 扫描按 retention 的十分之一节流，避免每次写入都遍历目录。
+func (s *FileStore) pruneLocked(now time.Time) error {
+	if s.retention <= 0 {
+		return nil
+	}
+	interval := s.retention / 10
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	if !s.lastPruned.IsZero() && now.Sub(s.lastPruned) < interval {
+		return nil
+	}
+	s.lastPruned = now
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return fmt.Errorf("读取 checkpoint 目录失败: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		if now.Sub(info.ModTime()) < s.retention {
+			continue
+		}
+		_ = os.Remove(filepath.Join(s.dir, entry.Name()))
+	}
+	return nil
 }
 
 // Save 保存快照并保证领域版本连续递增。
@@ -153,6 +195,7 @@ func (s *FileStore) writeLocked(snapshot agent.Checkpoint) error {
 	if err := os.Rename(tmpName, s.path(snapshot.RunID)); err != nil {
 		return fmt.Errorf("替换 checkpoint 失败: %w", err)
 	}
+	_ = s.pruneLocked(time.Now())
 	return nil
 }
 
