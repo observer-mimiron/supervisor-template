@@ -2,7 +2,7 @@
 
 **一个用确定性代码约束模型行为的 Go + Eino Agent 参考模板。** 模型只提出候选，权限、运行状态、审批、幂等和终态全部由确定性代码裁决，并配一套能证明自己会变红的验收门禁。
 
-模板开箱可跑：`/api/chat` 走真实 HTTP/SSE 链路，评测命令用同一入口执行版本化 Case 并产出可复核报告，全程不需要网络、凭证、Docker 或真实模型。
+模板开箱可跑：`/api/chat` 走真实 HTTP/SSE 链路，评测命令用同一入口执行版本化 Case 并产出可复核报告，本地门禁不需要网络、凭证、Docker 或真实模型。
 
 ```bash
 # 两分钟自己验证：先跑通，再看它会不会红
@@ -12,7 +12,7 @@ go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v4.json \
 ./eval/mutation-gate.sh                            # 门禁自证：改坏 7 处，必须全部被抓
 ```
 
-不想先读完全文的话，跳到 [门禁自证](#门禁自证)：这是本模板与同类脚手架最大的区别。
+不想先读完全文的话，跳到 [门禁自证](#门禁自证)：那里不是介绍门禁，而是改坏源码证明门禁真的会变红。
 
 ---
 
@@ -140,11 +140,11 @@ infrastructure → domain/application 合同
 | `idempotency-dedupe-off` | 相同幂等键只写一次 |
 | `approval-plan-level-binding` | 审批绑定到即将执行的那一个动作 |
 
-**只要有一条没被抓到，脚本以非 0 退出并指名该行**——那说明这条保护缺少覆盖，是下一步要补的测试或验收 Case，不是可以忽略的噪音。
+**有一条没被抓到，或者有注入因锚点失配而没能施加，脚本都会指名该行并以非 0 退出**：前者是退出码 `1`，说明这条保护缺少覆盖，是下一步要补的测试或验收 Case；后者是退出码 `2`，说明注入表已经和源码脱节，这一行从未被验证过。两者同时出现报 `2`——此时结论整体不可信。哪一种都不是可以忽略的噪音。
 
 输出是一张 `mutation × L0 × L1` 矩阵，两列都要读：`L1` 是验收数据集，`L0` 是 Go 合同测试。`policy-allowlist` 与 `idempotency-dedupe-off` 只有 `L0` 变红，它们在 `L1` **结构性不可达**（豁免与代码证据写在 `eval/coverage.json`），其余五行两层都能抓住。
 
-两条使用纪律：报"未抓到"之前先确认注入本身有效（注入点选错会得到假的"未抓到"，比不跑更糟）；门禁抓不住的那条保护就是下一步要补的用例。
+两条使用纪律：锚点失配不算"通过"——脚本以退出码 `2` 停下，要求先把注入表更新到当前源码，再谈结论；门禁抓不住的那条保护就是下一步要补的用例。
 
 ---
 
@@ -173,7 +173,7 @@ infrastructure → domain/application 合同
 | 版本化 Dataset、HTTP/SSE Runner、JSON/JSONL 报告 | `implemented` | 本地命令可实际跑通，默认不依赖外部服务 |
 | 四个确定性 Evaluator、基线门禁、覆盖率与归因、改坏验证 | `implemented` | 均为本地离线门禁 |
 | 失败 taxonomy、人工 disposition、Judge 合同 | `partial` | 合同与脱敏摘要已有；Judge 仍不进入门禁 |
-| OpenTelemetry / Langfuse 观测出口 | `partial` | 有低基数关联与运行证据；后端故障只记诊断，不影响判定；在线 Dataset/Score 同步 deferred |
+| OpenTelemetry / Langfuse 观测出口 | `partial` | 有低基数关联与运行证据；后端故障只记诊断，不影响判定；score 上传已实现（`cmd/eval -langfuse-upload`，读 `LANGFUSE_API_URL`/`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`，缺凭证只 warning、不改判定），Langfuse 托管 Dataset/Experiment 同步 deferred |
 | MySQL / GORM | `partial` | 有 adapter 与本地 smoke；不是默认依赖，不代表生产 HA |
 | 真实模型驱动的 Eino 多步 ReAct / Graph Runner | `deferred` | 当前默认 Runner 是最小单 Tool 适配器 |
 | 在线 LLM Judge、`coding-*` 场景 | `deferred` | 不进入默认硬门禁 |
