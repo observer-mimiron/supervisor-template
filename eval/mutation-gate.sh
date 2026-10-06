@@ -11,9 +11,18 @@
 #   ./eval/mutation-gate.sh approval     # 只跑名字匹配的那条
 #   L1_ONLY=1 ./eval/mutation-gate.sh    # 只跑 L1（跳过 go test，快）
 #
+# 退出码：
+#   0  每一条注入都已施加，且都被门禁抓到。
+#   1  有注入已施加但门禁没抓到 —— 该保护缺少覆盖。
+#   2  有注入因锚点失配而没能施加（该保护根本没被验证），或工作区自检失败；
+#      与 1 同时出现时报 2。
+#      两种非 0 都不能降级成警告：1 是缺测试，2 是这份改坏验证本身过期了。
+#
 # 说明：
 #   * 只改源码文本，改完立即从备份还原；不使用 git checkout，避免影响未提交的改动。
-#   * 编译失败也算"被抓到"（门禁确实红了），但会在输出里标明。
+#   * 编译失败也算"被抓到"（门禁确实红了），但输出只有 RED + caught，不区分
+#     "断言抓到"和"编译不过"。编译不过属于弱信号：它不证明这条保护有覆盖，
+#     不要拿它当覆盖证据。
 #   * 必须独占运行：脚本期间源码处于被改坏状态，不能与其他构建/测试并发。
 set -uo pipefail
 
@@ -72,6 +81,7 @@ printf '%-26s %-8s %-8s %s\n' "mutation" "L0" "L1" "result"
 printf '%-26s %-8s %-8s %s\n' "--------------------------" "------" "------" "------"
 
 undetected=0
+unapplied=0
 total=0
 for entry in "${MUTATIONS[@]}"; do
   IFS='|' read -r name file old new <<<"$entry"
@@ -98,6 +108,9 @@ open(path, 'w', encoding='utf-8').write(text.replace(old, new, 1))
 PY
   then
     printf '%-26s %-8s %-8s %s\n' "$name" "-" "-" "SKIP (anchor not found)"
+    # 锚点失配 = 这条保护没有被验证，既不是"抓到"也不是"通过"。必须计入失败，
+    # 否则注入表与源码脱节之后，脚本仍会宣布"全部抓到"并以 0 退出。
+    unapplied=$((unapplied + 1))
     cp "$backup" "$file"
     restore_current
     continue
@@ -139,10 +152,20 @@ if ! python3 "$ROOT/eval/check-residual.py" "$work/applied.txt"; then
 fi
 
 echo
-if [ "$undetected" -eq 0 ]; then
-  echo "PASS: all $total injected faults were caught by the gate."
-  exit 0
+if [ "$unapplied" -gt 0 ]; then
+  echo "FAIL: $unapplied of $total injections could not be applied (anchor not found)."
+  echo "      Those protections were NOT verified: update the mutation table to the current source."
 fi
-echo "FAIL: $undetected of $total injected faults passed the gate undetected."
-echo "      A green gate that cannot fail proves nothing; add coverage for the rows above."
-exit 1
+if [ "$undetected" -gt 0 ]; then
+  echo "FAIL: $undetected of $total injected faults passed the gate undetected."
+  echo "      A green gate that cannot fail proves nothing; add coverage for the rows above."
+fi
+if [ "$unapplied" -gt 0 ]; then
+  # 2 优先于 1：注入都没施加成功时，这一行的"抓到/没抓到"无从谈起，结论不可信。
+  exit 2
+fi
+if [ "$undetected" -gt 0 ]; then
+  exit 1
+fi
+echo "PASS: all $total injected faults were caught by the gate."
+exit 0
