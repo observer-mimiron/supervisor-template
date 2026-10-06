@@ -13,6 +13,8 @@ build/
 tmp/
 .env
 .env.*
+# 凭证一律不发布，但本地 smoke 的模板必须发布：新克隆需要它才知道 /api/* 要带什么。
+!.env.example
 .idea/
 .vscode/
 .codegraph/
