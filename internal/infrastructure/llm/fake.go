@@ -7,6 +7,8 @@ import (
 	"context"
 	"strings"
 
+	einomodel "github.com/cloudwego/eino/components/model"
+
 	"github.com/observer-mimiron/supervisor-template/internal/domain/agent"
 	"github.com/observer-mimiron/supervisor-template/internal/domain/conversation"
 )
@@ -43,6 +45,12 @@ func NewFakeSupervisorWithBuilder(routes []FakeRoute, build func(conversation.Ex
 		cloned[index].Matches = append([]string(nil), route.Matches...)
 	}
 	return &FakeSupervisor{routes: cloned, build: build}
+}
+
+// Model 永远返回 nil：确定性 fake Supervisor 不调用任何模型，Worker 也不应
+// 因此获得真实模型。需要模型 Runner 的 Worker 必须显式选择真实 provider。
+func (s *FakeSupervisor) Model() einomodel.ToolCallingChatModel {
+	return nil
 }
 
 // Decide 将只读问题和模拟触达问题映射到已声明 Tool。

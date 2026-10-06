@@ -230,25 +230,29 @@ func New(cfg config.Config) (*App, error) {
 		}
 	}
 	events := observation.WrapEventStore(eventStore)
-	var supervisor application.DecisionProvider
-	switch cfg.Model.Provider {
-	case "fake":
-		supervisor = llm.NewFakeSupervisorWithBuilder(toFakeRoutes(catalog.Routes()), examplebusiness.FakeDecisionBuilder)
-	case "deepseek":
-		instruction, readErr := os.ReadFile(cfg.ResolvePath(catalog.Supervisor().PromptFile))
-		if readErr != nil {
-			return nil, fmt.Errorf("读取 Supervisor Prompt 失败: %w", readErr)
-		}
-		supervisor, err = llm.NewDeepSeekSupervisor(context.Background(), llm.ModelOptions{
-			Name: cfg.Model.Name, BaseURL: cfg.Model.BaseURL, APIKeyEnv: cfg.Model.APIKeyEnv,
-			Temperature: cfg.Model.Temperature, MaxTokens: cfg.Model.MaxTokens, Timeout: cfg.Model.Timeout,
-			MaxSteps: catalog.Supervisor().MaxSteps,
-		}, string(instruction))
-		if err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("model provider %q 未注册", cfg.Model.Provider)
+	// provider 由 llm 包的注册表决定：未注册的 ID 在这里直接失败，不回退默认实现。
+	var supervisor llm.Provider
+	supervisor, err = llm.BuildProvider(context.Background(), cfg.Model.Provider, llm.ProviderParams{
+		Name:        cfg.Model.Name,
+		BaseURL:     cfg.Model.BaseURL,
+		APIKeyEnv:   cfg.Model.APIKeyEnv,
+		Temperature: cfg.Model.Temperature,
+		MaxTokens:   cfg.Model.MaxTokens,
+		Timeout:     cfg.Model.Timeout,
+		MaxSteps:    catalog.Supervisor().MaxSteps,
+		// 指令按需读取：fake provider 不调用它，因此提示词缺失只影响真实模型路径。
+		Instruction: func() (string, error) {
+			instruction, readErr := os.ReadFile(cfg.ResolvePath(catalog.Supervisor().PromptFile))
+			if readErr != nil {
+				return "", fmt.Errorf("读取 Supervisor Prompt 失败: %w", readErr)
+			}
+			return string(instruction), nil
+		},
+		Routes:   toFakeRoutes(catalog.Routes()),
+		Decision: examplebusiness.FakeDecisionBuilder,
+	})
+	if err != nil {
+		return nil, err
 	}
 	userQuery := catalog.Tools()[examplebusiness.ReadOnlyToolID]
 	var mcpClient *mcp.Client
@@ -272,60 +276,35 @@ func New(cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("Tool 装配失败: %w", err)
 	}
 	fakeRuntime := examplebusiness.NewFakeRuntime()
-	// fake_delay_ms 只影响 fake 实现：让某一步保持"仍在执行"，验收用例才能在其中取消。
-	fakeRuntime.SetToolDelay(examplebusiness.ReadOnlyToolID, time.Duration(userQuery.FakeDelayMS)*time.Millisecond)
-	fakeRuntime.SetToolDelay(examplebusiness.SummaryToolID, time.Duration(catalog.Tools()[examplebusiness.SummaryToolID].FakeDelayMS)*time.Millisecond)
-	fakeRuntime.SetToolDelay(examplebusiness.SideEffectToolID, time.Duration(catalog.Tools()[examplebusiness.SideEffectToolID].FakeDelayMS)*time.Millisecond)
-	if err := tools.RegisterHandler(examplebusiness.SummaryToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
-		return fakeRuntime.Execute(ctx, examplebusiness.SummaryToolID, input, key)
-	}); err != nil {
-		return nil, fmt.Errorf("Summary Tool 装配失败: %w", err)
+	toolDelays := make(map[string]int, len(catalog.Tools()))
+	for toolID, toolConfig := range catalog.Tools() {
+		toolDelays[toolID] = toolConfig.FakeDelayMS
 	}
-	if err := tools.RegisterHandler(examplebusiness.SideEffectToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
-		return fakeRuntime.Execute(ctx, examplebusiness.SideEffectToolID, input, key)
-	}); err != nil {
-		return nil, fmt.Errorf("副作用 Tool 装配失败: %w", err)
+	toolDeps := examplebusiness.ToolDeps{
+		Registry: tools,
+		Runtime:  fakeRuntime,
+		Config: examplebusiness.ToolConfig{
+			Implementation: userQuery.Implementation,
+			Endpoint:       userQuery.Endpoint,
+			MCPServer:      userQuery.MCPServer,
+			Timeout:        userQuery.Timeout,
+			FakeDelayMS:    toolDelays,
+		},
 	}
-	switch userQuery.Implementation {
-	case "", examplebusiness.ReadOnlyToolFake:
-		if err := tools.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
-			return fakeRuntime.Execute(ctx, examplebusiness.ReadOnlyToolID, input, key)
-		}); err != nil {
-			return nil, fmt.Errorf("查询 Tool 装配失败: %w", err)
-		}
-	case examplebusiness.ReadOnlyToolHTTP:
-		readOnly, buildErr := toolinfra.NewHTTPReadOnlyTool(userQuery.Endpoint, userQuery.Timeout)
-		if buildErr != nil {
-			return nil, buildErr
-		}
-		if err := tools.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
-			return readOnly.Execute(ctx, input)
-		}); err != nil {
-			return nil, fmt.Errorf("HTTP Tool 装配失败: %w", err)
-		}
-	case examplebusiness.ReadOnlyToolMCP:
-		if mcpClient == nil || userQuery.MCPServer == "" {
-			return nil, errors.New("MCP Tool 未配置 client 或 server")
-		}
-		if err := tools.RegisterHandler(examplebusiness.ReadOnlyToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
-			return mcpClient.Call(ctx, userQuery.MCPServer, examplebusiness.ReadOnlyToolID, input)
-		}); err != nil {
-			return nil, fmt.Errorf("MCP Tool 装配失败: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("Tool 实现 %q 未注册", userQuery.Implementation)
+	// 只读 Tool 的 http 实现由装配层注入，业务包只依赖"可执行"这一能力接口。
+	toolDeps.HTTPReadOnly = func(endpoint string, timeout time.Duration) (examplebusiness.ReadOnlyExecutor, error) {
+		return toolinfra.NewHTTPReadOnlyTool(endpoint, timeout)
+	}
+	// 显式判空后再赋值：typed-nil 指针装进接口就不再等于 nil，按需赋值可避免
+	// 未启用的能力被当成已装配。
+	if mcpClient != nil {
+		toolDeps.MCP = mcpClient
 	}
 	if mysqlOrders != nil {
-		if err := tools.RegisterHandler(examplebusiness.MySQLQueryToolID, func(ctx context.Context, input map[string]string, _ string) (string, error) {
-			return mysqlOrders.Query(ctx, []byte(input["message"]))
-		}); err != nil {
-			return nil, fmt.Errorf("MySQL 查询 Tool 装配失败: %w", err)
-		}
-		if err := tools.RegisterHandler(examplebusiness.MySQLInsertToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
-			return mysqlOrders.Insert(ctx, []byte(input["message"]), key)
-		}); err != nil {
-			return nil, fmt.Errorf("MySQL 写入 Tool 装配失败: %w", err)
-		}
+		toolDeps.Orders = mysqlOrders
+	}
+	if err := examplebusiness.RegisterToolHandlers(toolDeps); err != nil {
+		return nil, err
 	}
 	workers := make([]operation.WorkerContract, 0, len(cfg.Agent.Workers))
 	limits := catalog.Limits()
@@ -362,10 +341,8 @@ func New(cfg config.Config) (*App, error) {
 		})
 	}
 	authenticator := authinfra.NewStaticBearerAuthenticator(authCredentials)
-	var modelProvider ModelProvider
-	if realSupervisor, ok := supervisor.(*llm.RealSupervisor); ok {
-		modelProvider = realSupervisor
-	}
+	// provider 自带它的模型；fake provider 返回 nil，需要模型的 Runner 会在装配期报错。
+	var modelProvider ModelProvider = supervisor
 	runnerFactory := NewRunnerFactory(modelProvider, tools, tools, contracts, einoinfra.NewMemoryCheckpointStore(), cfg.ResolvePath)
 	runners := make(map[string]application.WorkerRunner)
 	for workerID, worker := range catalog.Workers() {
