@@ -27,12 +27,17 @@ const (
 	SummaryToolFake      = "fake.user_summary_query"
 	SideEffectToolID     = "simulated_outreach"
 	SideEffectToolFake   = "fake.simulated_outreach"
-	MySQLWorkerID        = "mysql_order"
-	MySQLWorkerImpl      = "gorm.mysql_order"
-	MySQLQueryToolID     = "mysql_order_query"
-	MySQLInsertToolID    = "mysql_order_insert"
-	MySQLQueryImpl       = "gorm.mysql_order_query"
-	MySQLInsertImpl      = "gorm.mysql_order_insert"
+	// RawExportToolID 是"上游原始导出"这类只读能力：它如实返回上游给的东西，
+	// 包括上游系统自己的内部来源路径。正因如此它才会撞上 Final Guard ——
+	// 这是唯一能在验收数据集里触发"敏感输出不得进入公开文本事件"的链路。
+	RawExportToolID   = "raw_audience_export"
+	RawExportToolFake = "fake.raw_audience_export"
+	MySQLWorkerID     = "mysql_order"
+	MySQLWorkerImpl   = "gorm.mysql_order"
+	MySQLQueryToolID  = "mysql_order_query"
+	MySQLInsertToolID = "mysql_order_insert"
+	MySQLQueryImpl    = "gorm.mysql_order_query"
+	MySQLInsertImpl   = "gorm.mysql_order_insert"
 )
 
 // Worker 描述一个已注册的示例 Worker 及其固定边界。
@@ -60,7 +65,7 @@ var worker = Worker{
 	Implementation: WorkerImplementation,
 	Runner:         RunnerID,
 	PromptFile:     PromptFile,
-	AllowedTools:   []string{ReadOnlyToolID, SideEffectToolID},
+	AllowedTools:   []string{ReadOnlyToolID, SideEffectToolID, RawExportToolID},
 }
 
 var summaryWorker = Worker{
@@ -80,6 +85,7 @@ var routes = []Route{
 	{ID: ReadOnlyToolID, WorkerID: WorkerID, Intent: WorkerID, Matches: []string{"分析", "查询", "分群"}, ToolID: ReadOnlyToolID, Risk: agent.RiskReadOnly},
 	{ID: SummaryToolID, WorkerID: SummaryWorkerID, Intent: "summarize_user_analysis", Matches: []string{"总结", "汇总"}, ToolID: SummaryToolID, Risk: agent.RiskReadOnly},
 	{ID: SideEffectToolID, WorkerID: WorkerID, Intent: WorkerID, Matches: []string{"触达", "发送", "模拟写入"}, ToolID: SideEffectToolID, Risk: agent.RiskSideEffect},
+	{ID: RawExportToolID, WorkerID: WorkerID, Intent: WorkerID, Matches: []string{"原始导出", "导出原始"}, ToolID: RawExportToolID, Risk: agent.RiskReadOnly},
 	{ID: MySQLQueryToolID, WorkerID: MySQLWorkerID, Intent: MySQLWorkerID, Matches: []string{"订单查询", "查询订单"}, ToolID: MySQLQueryToolID, Risk: agent.RiskReadOnly},
 	{ID: MySQLInsertToolID, WorkerID: MySQLWorkerID, Intent: MySQLWorkerID, Matches: []string{"创建订单", "插入订单", "下单"}, ToolID: MySQLInsertToolID, Risk: agent.RiskSideEffect},
 }
@@ -148,6 +154,7 @@ func ToolContracts(readOnlyImplementation string) []domaintool.Contract {
 		{ToolID: ReadOnlyToolID, Implementation: readOnlyImplementation, Risk: string(agent.RiskReadOnly), RetryLimit: 1, Summary: "只读查询示例客群", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
 		{ToolID: SummaryToolID, Implementation: SummaryToolFake, Risk: string(agent.RiskReadOnly), RetryLimit: 1, Summary: "只读汇总上一步分析结果", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
 		{ToolID: SideEffectToolID, Implementation: SideEffectToolFake, Risk: string(agent.RiskSideEffect), RequiresApproval: true, IdempotencyRequired: true, Summary: "模拟触达示例用户", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
+		{ToolID: RawExportToolID, Implementation: RawExportToolFake, Risk: string(agent.RiskReadOnly), RetryLimit: 1, Summary: "只读导出上游原始客群片段", RequiredInputs: []string{"message"}, MaxInputBytes: 64 << 10, MaxOutputBytes: 1 << 20},
 	}
 }
 
@@ -162,7 +169,7 @@ func ToolContractsWithMySQL(readOnlyImplementation string) []domaintool.Contract
 
 // ToolIDs returns all Tool IDs owned by this business module.
 func ToolIDs() []string {
-	return []string{ReadOnlyToolID, SummaryToolID, SideEffectToolID, MySQLQueryToolID, MySQLInsertToolID}
+	return []string{ReadOnlyToolID, SummaryToolID, SideEffectToolID, RawExportToolID, MySQLQueryToolID, MySQLInsertToolID}
 }
 
 // ToolImplementations 返回指定 Tool 的已注册实现集合副本。
@@ -174,6 +181,8 @@ func ToolImplementations(toolID string) []string {
 		return []string{SummaryToolFake}
 	case SideEffectToolID:
 		return []string{SideEffectToolFake}
+	case RawExportToolID:
+		return []string{RawExportToolFake}
 	case MySQLQueryToolID:
 		return []string{MySQLQueryImpl}
 	case MySQLInsertToolID:

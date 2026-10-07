@@ -1,10 +1,10 @@
 {
   "baseline_name": "synthetic-operations",
   "dataset_name": "synthetic-operations",
-  "dataset_version": "4",
+  "dataset_version": "5",
   "evaluator_version": "2",
   "report_schema_version": 2,
-  "approved_at": "2026-10-04T07:54:14.176142723Z",
+  "approved_at": "2026-10-07T03:01:07.516954425Z",
   "cases": [
     {
       "case_id": "boundary-approved-outreach",
@@ -47,6 +47,12 @@
       "case_version": "1.0.0",
       "passed": true,
       "verdict_digest": "ae94cb46ae40d10b509aec510d83b587a4093fcb0d25d105e71c7dc332a6e5f6"
+    },
+    {
+      "case_id": "negative-raw-export-blocked",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "6fea31b6c7f5437a892901904a9b25d1ab224b2dc1405cbb542f8e68f5c19bfa"
     },
     {
       "case_id": "negative-reject-outreach",

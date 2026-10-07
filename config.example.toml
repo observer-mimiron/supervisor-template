@@ -76,7 +76,7 @@ implementation = "fake.user_analysis"
 runner = "single_tool"
 # 可选：eino_adk（需要真实 ToolCallingChatModel，例如 deepseek）
 prompt_file = "prompts/user_analysis.md"
-allowed_tools = ["user_query", "simulated_outreach"]
+allowed_tools = ["user_query", "simulated_outreach", "raw_audience_export"]
 timeout = "20s"
 
 [agent.workers.user_summary]
@@ -108,6 +108,15 @@ matches = ["总结", "汇总"]
 tool = "user_summary_query"
 risk = "read_only"
 
+# 只读的"上游原始导出"链路。它存在的目的是让 Final Guard 在验收数据集里可达：
+# 上游返回的内容里带着内部来源路径，Run 必须以 failed 收尾而不是把它投影成文本。
+[agent.routes.raw_audience_export]
+worker = "user_analysis"
+intent = "user_analysis"
+matches = ["原始导出", "导出原始"]
+tool = "raw_audience_export"
+risk = "read_only"
+
 [tools.user_query]
 enabled = true
 implementation = "fake.user_query"
@@ -132,6 +141,13 @@ max_retries = 0
 [tools.user_summary_query]
 enabled = true
 implementation = "fake.user_summary_query"
+risk = "read_only"
+timeout = "5s"
+max_retries = 1
+
+[tools.raw_audience_export]
+enabled = true
+implementation = "fake.raw_audience_export"
 risk = "read_only"
 timeout = "5s"
 max_retries = 1

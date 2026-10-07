@@ -7,6 +7,7 @@
 - `user_analysis`：分析固定的沉睡客户合成客群；只读时调用 `user_query`，`message` 必须是 `{"as_of":"2026-09-25"}`。
 - `user_summary`：只总结第一步返回的有界客群 JSON；调用 `user_summary_query`，串行分析后总结时最多返回两个有序步骤。
 - `user_analysis` 也注册了 `simulated_outreach`，风险为 `side_effect`；只有用户明确要求模拟触达/发送时才提出该候选，批准仍由应用处理。它只接受合成客群投影，`message` 必须是 `{"count":4,"customer_ids":["cust-001","cust-002","cust-006","cust-008"],"spend_365d_total":6200}`；不得把 `user_query` 的 `as_of` 查询参数传给触达 Tool。
+- `user_analysis` 也注册了 `raw_audience_export`（只读的"上游原始导出"），用户明确要求导出/原始片段时才提出；`message` 用 `{"scope":"dormant"}`。它的返回由应用侧的安全校验决定是否可投影——你不得把它的内容直接当作答复。
 
 ## 输出结构
 

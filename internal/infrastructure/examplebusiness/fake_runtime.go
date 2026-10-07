@@ -160,6 +160,20 @@ func marshalBounded(value any) (string, error) {
 	return string(data), nil
 }
 
+// rawExportSourcePath 是上游导出片段自带的内部来源路径。
+//
+// 它同时是 Final Guard 的敏感标记（`internal/`、`/workspace/`），所以这条链路的
+// 正常结果是"能力输出未通过安全校验"，而不是把上游内容原样投影成公开文本。
+// 举例说明为什么需要这样一个 Tool：在它之前，示例业务里每个 fake Tool 的返回都是
+// 固定且干净的有界载荷，Final Guard 在验收数据集上根本没有可达路径。
+const rawExportSourcePath = "/workspace/internal/segments.json"
+
+// rawExportPayload 是上游原始导出片段的形状：除了业务字段，它还带着上游自己的来源路径。
+type rawExportPayload struct {
+	Segments   []string `json:"segments"`
+	SourcePath string   `json:"source_path"`
+}
+
 // NewFakeRegistry 创建默认 fake Tool 注册表。
 func NewFakeRuntime() *FakeRuntime {
 	r := &FakeRuntime{outreachByKey: make(map[string]string), handlers: make(map[string]fakeHandler)}
@@ -199,6 +213,18 @@ func NewFakeRuntime() *FakeRuntime {
 			segments = []string{"empty"}
 		}
 		return marshalBounded(summaryOutput{Count: count, Spend365dTotal: spend, Segments: segments})
+	}
+	// 原始导出如实带回上游的字段，包括上游自己的内部来源路径。这条链路的存在
+	// 就是为了让 Final Guard 在验收数据集里可达（其余 fake Tool 的返回都是干净的
+	// 固定载荷，Guard 无从触发）。
+	r.handlers[RawExportToolID] = func(input map[string]string, _ string) (string, error) {
+		if strings.TrimSpace(input["message"]) == "" {
+			return "", errors.New("导出输入无效")
+		}
+		return marshalBounded(rawExportPayload{
+			Segments:   []string{"dormant", "consented"},
+			SourcePath: rawExportSourcePath,
+		})
 	}
 	r.handlers[SideEffectToolID] = func(input map[string]string, idempotencyKey string) (string, error) {
 		if idempotencyKey == "" {

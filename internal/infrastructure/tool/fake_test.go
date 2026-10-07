@@ -70,11 +70,16 @@ func TestRegistryRejectsUnknownToolID(t *testing.T) {
 
 func TestContractsAreExplicitAndStable(t *testing.T) {
 	contracts := examplebusiness.ToolContracts(examplebusiness.ReadOnlyToolMCP)
-	if len(contracts) != 3 || contracts[0].ToolID != "user_query" || contracts[2].ToolID != "simulated_outreach" {
+	if len(contracts) != 4 || contracts[0].ToolID != "user_query" || contracts[2].ToolID != "simulated_outreach" || contracts[3].ToolID != "raw_audience_export" {
 		t.Fatalf("unexpected descriptor registry: %#v", contracts)
 	}
 	if contracts[0].Implementation != "mcp.read_only" || !contracts[2].RequiresApproval || !contracts[2].IdempotencyRequired {
 		t.Fatalf("descriptor contract lost safety fields: %#v", contracts)
+	}
+	// 原始导出是只读能力：它必须**不**要求审批、**不**需要幂等键，否则会被误当成
+	// 副作用动作拦住，而它真正的保护点是 Final Guard（上游内容不得原样投影）。
+	if contracts[3].Implementation != examplebusiness.RawExportToolFake || contracts[3].RequiresApproval || contracts[3].IdempotencyRequired || contracts[3].Risk != "read_only" {
+		t.Fatalf("raw export contract is not a plain read-only tool: %#v", contracts[3])
 	}
 }
 

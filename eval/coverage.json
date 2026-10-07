@@ -1,5 +1,5 @@
 {
-  "dataset": "synthetic-operations@4",
+  "dataset": "synthetic-operations@5",
   "notes": [
     "claims 是人工评审过的映射：每条要么指向用例，要么显式豁免并写明理由。",
     "改动用例集或新增 claim 时必须同时更新本文件与 dataset 版本。"
@@ -88,6 +88,14 @@
       ]
     },
     {
+      "id": "sensitive-tool-output-is-not-projected",
+      "source": "principle: deterministic-policy-owns-authority",
+      "statement": "能力结果含敏感标记（凭证、Prompt、内部路径）时 Run 必须以 failed 收尾且不投影 text 事件；上游原始导出链路（raw_audience_export）是这条保护在验收层的可达路径",
+      "cases": [
+        "negative-raw-export-blocked"
+      ]
+    },
+    {
       "id": "worker-tool-allow-list",
       "source": "principle: deterministic-policy-owns-authority",
       "statement": "Worker 只能调用其 allow-list 内的 Tool；已注册但越权的 Tool 被拒绝",
@@ -102,6 +110,14 @@
       "cases": [],
       "waived": true,
       "waiver_reason": "该性质要求 prepared 与 running 之间的进程中断（internal/application/run/service.go 的恢复路径），单进程 HTTP 验收无法制造。由 internal/application/run 的恢复合同测试覆盖。"
+    },
+    {
+      "id": "terminal-uniqueness-per-run",
+      "source": "principle: one-owner-per-state-and-contract",
+      "statement": "每个 run 只产生一个公开终态事件",
+      "cases": [],
+      "waived": true,
+      "waiver_reason": "改坏验证 terminal-uniqueness-off（关掉 internal/infrastructure/eventbus 的终态守卫）实测只有 L0 变红：单进程验收里运行状态机自己就不会产生第二个终态（服务层在已终态计划上直接跳过），eventbus 的守卫在 L1 路径上不可达。由 internal/infrastructure/eventbus 的 TestMemoryBusAssignsSequenceAndRejectsSecondTerminal 覆盖。"
     }
   ]
 }

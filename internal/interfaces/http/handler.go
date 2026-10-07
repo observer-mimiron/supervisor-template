@@ -88,12 +88,15 @@ func NewRouter(service *run.Service, health application.HealthService, authentic
 		c.Set(optionsContextKey, options)
 		c.Next()
 	})
+	// /healthz 的两种结果用同一个 JSON 包络（只有 status 字段）：健康 `ok` 返回 200，
+	// 依赖不完整时 `unhealthy` 返回 503。调用方不必按不同 content-type 分支处理，
+	// 探针也不必为两种结果各写一套解析。
 	router.GET("/healthz", func(c *gin.Context) {
 		if !health.Healthy() {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unhealthy"})
 			return
 		}
-		c.String(http.StatusOK, "ok")
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 	api := router.Group("/api", authenticate(authenticator))
 	api.POST("/chat", func(c *gin.Context) { handleChat(c, service) })

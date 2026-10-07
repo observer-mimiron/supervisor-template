@@ -97,6 +97,44 @@ func TestProtectedRoutesRequireBearerToken(t *testing.T) {
 	}
 }
 
+// TestHealthEndpointReturnsJSON 固定 /healthz 的对外形状：健康与不健康使用同一个
+// JSON 包络与同一个字段名，只有状态码不同。此前健康分支返回纯文本 `ok`，探针必须
+// 为两种 content-type 各写一套解析，且这条路由没有任何测试断言它的响应体。
+func TestHealthEndpointReturnsJSON(t *testing.T) {
+	router, app := newTestRouterWithApp(t)
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("healthy status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("healthy content type = %q", contentType)
+	}
+	if body := strings.TrimSpace(response.Body.String()); body != `{"status":"ok"}` {
+		t.Fatalf("healthy body = %s", body)
+	}
+
+	// 依赖不完整：同一个包络、字段名不变，状态码变为 503。
+	unhealthy := NewRouter(app.Run, application.HealthService{}, app.Authenticator, Options{})
+	request = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response = httptest.NewRecorder()
+
+	unhealthy.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unhealthy status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("unhealthy content type = %q", contentType)
+	}
+	if body := strings.TrimSpace(response.Body.String()); body != `{"status":"unhealthy"}` {
+		t.Fatalf("unhealthy body = %s", body)
+	}
+}
+
 func TestSSEProjectionRedactsSensitiveFields(t *testing.T) {
 	router := newTestRouter(t)
 	request := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(`{"conversation_id":"demo","message":"分析示例用户分群"}`))

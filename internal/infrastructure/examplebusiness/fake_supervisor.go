@@ -12,6 +12,7 @@ const (
 	fixedAudienceProjection = "{\"count\":4,\"customer_ids\":[\"cust-001\",\"cust-002\",\"cust-006\",\"cust-008\"],\"spend_365d_total\":6200}"
 	fixedOrderQuery         = "{\"user_id\":1}"
 	fixedOrderInsert        = "{\"user_id\":1,\"product_id\":1,\"quantity\":1,\"total_amount\":\"19.90\"}"
+	fixedRawExportQuery     = "{\"scope\":\"dormant\"}"
 )
 
 // FakeDecisionBuilder adapts the example business fixture to the generic LLM
@@ -37,6 +38,8 @@ func FakeDecisionBuilder(request conversation.ExecutionRequest, workerID, intent
 		toolMessage = fixedOrderQuery
 	case MySQLInsertToolID:
 		toolMessage = fixedOrderInsert
+	case RawExportToolID:
+		toolMessage = fixedRawExportQuery
 	}
 	decision := agent.SupervisorDecision{
 		DecisionID: request.RunID + ":decision",

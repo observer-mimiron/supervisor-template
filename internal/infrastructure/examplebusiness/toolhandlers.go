@@ -92,6 +92,13 @@ func RegisterToolHandlers(deps ToolDeps) error {
 	}); err != nil {
 		return fmt.Errorf("副作用 Tool 装配失败: %w", err)
 	}
+	// 原始导出只有 fake 实现：它是为了让 Final Guard 在验收数据集里可达而存在的
+	// 示例链路，不接真实导出系统。
+	if err := deps.Registry.RegisterHandler(RawExportToolID, func(ctx context.Context, input map[string]string, key string) (string, error) {
+		return deps.Runtime.Execute(ctx, RawExportToolID, input, key)
+	}); err != nil {
+		return fmt.Errorf("原始导出 Tool 装配失败: %w", err)
+	}
 	if err := registerReadOnlyTool(deps); err != nil {
 		return err
 	}

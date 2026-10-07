@@ -45,7 +45,7 @@ jobs:
       - name: coverage of claims by cases
         run: |
           go run ./cmd/eval \
-            -dataset ./eval/datasets/synthetic-operations-v4.json \
+            -dataset ./eval/datasets/synthetic-operations-v5.json \
             -check-coverage ./eval/coverage.json \
             -config ./config.example.toml
 
@@ -55,7 +55,7 @@ jobs:
       - name: acceptance cases
         run: |
           go run ./cmd/eval \
-            -dataset ./eval/datasets/synthetic-operations-v4.json \
+            -dataset ./eval/datasets/synthetic-operations-v5.json \
             -report ./tmp/eval-report-ci.json \
             -jsonl ./tmp/eval-report-ci.jsonl \
             -triage ./tmp/eval-triage-ci.json \
@@ -80,9 +80,9 @@ jobs:
       - name: baseline regression gate
         run: |
           go run ./cmd/eval \
-            -dataset ./eval/datasets/synthetic-operations-v4.json \
+            -dataset ./eval/datasets/synthetic-operations-v5.json \
             -report ./tmp/eval-report-baseline.json \
-            -baseline ./eval/baselines/synthetic-operations-v4.json \
+            -baseline ./eval/baselines/synthetic-operations-v5.json \
             -code-version ${{ github.sha }} \
             -risk high \
             -config ./config.example.toml
