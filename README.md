@@ -4,6 +4,11 @@
 
 这个仓库的重点是把一条可检查的运行链路跑通：HTTP/SSE 请求经过应用层、Policy Gate、执行计划、Worker 和 Tool，最后变成有序的运行事件。示例业务是合成的，不连接真实 CRM、营销渠道或客户数据。
 
+## 适用范围
+
+- **适合**：有副作用的运营 / 客服 / 数据类 Agent（发消息、下单、写库需要审批、幂等与审计留痕）；需要人工审批介入的长流程；把"模型不可信"作为设计前提的系统；需要可复核质量门禁的团队。
+- **不适合**：开放式自主循环、多 Agent 协作、DAG 工作流编排；画布、插件市场、多租户 SaaS；数据库级或跨进程 exactly-once、多主高可用；把 LLM judge 或模型自评分当作合并门禁。
+
 ## 快速开始
 
 需要 Go 1.25 或更高版本。依赖下载完成后，本地 fake 和评测不需要模型密钥、Docker 或外部服务。
@@ -57,6 +62,18 @@ curl -N -X POST http://127.0.0.1:8080/api/chat \
   -d '{"conversation_id":"c1","message":"查询最近30天活跃客群"}'
 ```
 
+会按顺序收到 8 条 SSE 事件：`started`、`decision`、`plan`、`progress`、`tool_call`、`progress`、`text`、`completed`。每条是 `event:` 加一行 JSON `data:`：
+
+```text
+event: started
+data: {"event_id":"run-1791477266199330235-1:event:1","run_id":"run-1791477266199330235-1","trace_id":"c5f61087c4cea4f1d70c2920285ada76","sequence":1,"type":"started","data":{"conversation_id":"c1"}}
+
+event: completed
+data: {"event_id":"run-1791477266199330235-1:event:8","run_id":"run-1791477266199330235-1","trace_id":"c5f61087c4cea4f1d70c2920285ada76","sequence":8,"type":"completed","data":{"message":"执行完成"}}
+```
+
+每条 `data` 都带 `event_id`、`run_id`、`trace_id`、单调递增的 `sequence` 和 `type`；事件先落库再按顺序投影，所以这是重放而不是边执行边推的 token 流。
+
 默认配置的模型 provider 是 DeepSeek。去掉 `-fake` 后，API key 从 `[model].api_key_env` 指定的环境变量读取。不要把原始 token 或 API key 写进配置文件。
 
 服务路由：
@@ -109,6 +126,19 @@ HTTP/SSE + AuthN
 ## 评测
 
 Case 走的是与线上完全一致的 `/api/chat`、approval、resume、cancel 路由，判定只读结构化证据。**L0**（格式、静态检查、依赖方向、单元与合同测试含 race）与 **L1**（真实 HTTP/SSE 链路上的确定性验收 Case、claim ↔ Case 覆盖率校验、基线回归）可阻断合并；**L2**（可选 LLM judge 与在线模型评测）不可阻断，当前没有可执行的 judge，只有 `-langfuse-upload` 这个非阻断的分数 sink。
+
+L1 的三件事都有可执行入口，跑完「快速开始」里那条数据集命令只完成第一件：
+
+```bash
+# 2. claim ↔ Case 覆盖率：每条 claim 要么指向存在的 Case，要么显式豁免并写明理由
+go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v5.json \
+  -check-coverage ./eval/coverage.json -config ./config.example.toml
+
+# 3. 基线回归：在同一份完整数据集上加 -baseline 再跑一次，出现 regression / missing 即失败
+./tmp/eval -dataset ./eval/datasets/synthetic-operations-v5.json \
+  -report ./tmp/eval-report.json -baseline ./eval/baselines/synthetic-operations-v5.json \
+  -config ./config.example.toml
+```
 
 四个确定性 Evaluator 各自硬断言一个维度：`business_correctness`（终态、事件类型序列、Case 声明的结构化结果字段）、`architecture_boundary`（每次 Tool 调用都能对上启动期注册与 Policy 证据）、`side_effect_safety`（副作用的前置审批与幂等、写入计数、cleanup）、`stability`（事件序号单调、trace 关联、耗时与重试预算、重复判定稳定）。
 
