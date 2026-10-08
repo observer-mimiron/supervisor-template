@@ -16,13 +16,15 @@
 ### 跑本地检查
 
 ```bash
-gofmt -l cmd internal eval
+gofmt -l cmd internal eval          # 通过时无输出
 go vet ./cmd/... ./internal/... ./eval/...
-go run ./cmd/archcheck
+go run ./cmd/archcheck              # 通过时打印两行：依赖方向 OK、每个 TOML 字段都有消费方
 go test ./cmd/... ./internal/... ./eval/...
 go test -race ./cmd/... ./internal/... ./eval/...
 go build ./cmd/server/
 ```
+
+这里用显式包前缀而不是 `./...`：如果 Go module cache 落在仓库内（本仓库的开发工作区把 `tmp/modcache` 放在仓库里），`./...` 会递归进去并以 `contained in a module that is not one of the workspace modules` 失败；此时先 `export GOMODCACHE="$PWD/tmp/modcache" GOCACHE="$PWD/tmp/gocache" GOSUMDB=off`。全新 clone 没有 `tmp/` 时两者等价，CI 用的是 `./...`。
 
 运行版本化的 HTTP/SSE 验收用例：
 
@@ -36,7 +38,7 @@ go build -o ./tmp/eval ./cmd/eval
   -config ./config.example.toml
 ```
 
-当前数据集包含 13 个 Case。全部通过时输出 `passed=13 failed=0`，退出码为 `0`；断言失败为 `1`；数据集或装配无效为 `2`。需要区分 `1` 和 `2` 时使用构建出的二进制，因为 `go run` 会把非零退出码折叠成 `1`。
+当前数据集包含 13 个 Case。全部通过时输出 `passed=13 failed=0`，退出码为 `0`；确定性断言失败为 `1`；setup error 为 `2`（数据集、覆盖率文件或基线不可比、profile 不匹配等都算，且不写报告）。需要区分 `1` 和 `2` 时使用构建出的二进制，因为 `go run` 会把非零退出码折叠成 `1`。
 
 要验证门禁确实能拦住回归，可以运行：
 
@@ -134,7 +136,7 @@ L1 的三件事都有可执行入口，跑完「快速开始」里那条数据�
 go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v5.json \
   -check-coverage ./eval/coverage.json -config ./config.example.toml
 
-# 3. 基线回归：在同一份完整数据集上加 -baseline 再跑一次，出现 regression / missing 即失败
+# 3. 基线回归：在同一份完整数据集上加 -baseline 再跑一次；regression / missing 退出码 1，基线版本与 dataset/evaluator 不一致退出码 2
 ./tmp/eval -dataset ./eval/datasets/synthetic-operations-v5.json \
   -report ./tmp/eval-report.json -baseline ./eval/baselines/synthetic-operations-v5.json \
   -config ./config.example.toml
@@ -142,11 +144,13 @@ go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v5.json \
 
 四个确定性 Evaluator 各自硬断言一个维度：`business_correctness`（终态、事件类型序列、Case 声明的结构化结果字段）、`architecture_boundary`（每次 Tool 调用都能对上启动期注册与 Policy 证据）、`side_effect_safety`（副作用的前置审批与幂等、写入计数、cleanup）、`stability`（事件序号单调、trace 关联、耗时与重试预算、重复判定稳定）。
 
-### 门禁自证
+### 门禁自证（证明门禁本身能失败）
 
 一个不会变红的门禁等于没有门禁。`eval/mutation-gate.sh` 对 7 处受保护行为注入**真实故障**——直接改源码 → 跑门禁 → 断言必须变红 → 立即从备份逐字节还原。这 7 处是：Worker/Tool 白名单、副作用前置审批、敏感输出拦截、终态唯一性、取消信号、幂等键去重、审批绑定到即将执行的那个动作。
 
-没被抓到（退出码 `1`），或者注入因锚点失配没能施加、干净树探针本来就是红的（退出码 `2`），脚本都会指名该行并以非 0 退出。输出是一张 `mutation × L0 × L1` 矩阵，两列都要读：白名单、幂等去重、终态唯一性三行只有 `L0` 变红，它们在 `L1` **结构性不可达**（豁免与代码证据写在 `eval/coverage.json`），其余四行两层都能抓住。
+退出码 `1` 表示这条保护没被抓到：该保护缺少覆盖，是下一步要补的测试或验收 Case。退出码 `2` 表示这次改坏验证本身不可信：注入因锚点失配没能施加，或者干净树探针本来就是红的。两种情况脚本都会指名该行并以非 0 退出，都不是可以忽略的噪音。
+
+矩阵是 `mutation × L0 × L1`，两列都要读：白名单、幂等去重、终态唯一性三行只有 `L0` 变红，它们在 `L1` **结构性不可达**（豁免与代码证据写在 `eval/coverage.json`），其余四行两层都能抓住。
 
 ## 配置
 
@@ -165,11 +169,12 @@ go run ./cmd/eval -dataset ./eval/datasets/synthetic-operations-v5.json \
 
 模板自带的示例业务集中在 [`internal/infrastructure/examplebusiness`](./internal/infrastructure/examplebusiness)。替换业务时通常需要：
 
-1. 在 `registry.go` 声明 Worker、Route、Tool contract 和实现标识；
-2. 在 `toolhandlers.go` 注册 Tool handler；
-3. 在 `config.example.toml` 登记 Worker、Route 和 Tool；
-4. 在 `prompts/` 添加使用 `eino_adk` Runner 所需的 prompt；
-5. 在 `eval/datasets/` 和 `eval/coverage.json` 增加可重放的验收 Case。
+1. 在 `registry.go` 登记新链路。这是 6 处手改点：常量、`AllowedTools`、`routes`、`ToolContracts`、`ToolIDs` 和 `ToolImplementations` switch——漏登会让 `TestContractsAreExplicitAndStable` 失败，这是设计意图，不是误报；
+2. 在 `fake_runtime.go` 和 `fake_supervisor.go` 补确定性输入，让本地 fake 链路能走到这条链路；
+3. 在 `toolhandlers.go` 注册 Tool handler；本包只依赖"注册表 / 执行器"这类能力接口，不 import Tool 实现包；
+4. 在 `config.example.toml` 三处登记：worker allow-list、route、tools——未登记的引用会让启动直接失败；
+5. 在 `prompts/` 添加使用 `eino_adk` Runner 所需的 prompt；
+6. 在 `eval/datasets/` 和 `eval/coverage.json` 增加可重放的验收 Case 与 claim，否则覆盖率校验会失败。
 
 `internal/composition/` 只负责注册和装配，不承载业务判断。新增能力仍要经过注册表、Policy Gate 和对应测试。
 
