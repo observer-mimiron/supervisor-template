@@ -24,7 +24,7 @@ go test -race ./cmd/... ./internal/... ./eval/...
 go build ./cmd/server/
 ```
 
-这里用显式包前缀而不是 `./...`：如果 Go module cache 落在仓库内（本仓库的开发工作区把 `tmp/modcache` 放在仓库里），`./...` 会递归进去并以 `contained in a module that is not one of the workspace modules` 失败；此时先 `export GOMODCACHE="$PWD/tmp/modcache" GOCACHE="$PWD/tmp/gocache" GOSUMDB=off`。全新 clone 没有 `tmp/` 时两者等价，CI 用的是 `./...`。
+`tmp/` 里不放 Go 缓存，`./...` 与本仓库 CI 一致；上面的显式包前缀是为了兼容本机把 module cache 放进仓库的情况（`GOMODCACHE=$PWD/tmp/modcache` 时 `./...` 会递归进去并以 `contained in a module that is not one of the workspace modules` 失败）。编译缓存固定 `export GOCACHE=/tmp/go-build`。
 
 运行版本化的 HTTP/SSE 验收用例：
 
