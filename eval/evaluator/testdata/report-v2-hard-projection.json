@@ -1,0 +1,1152 @@
+{
+  "projection_version": "1",
+  "captured_from": {
+    "report_path": "tmp/semantic-005/report-v2.json",
+    "report_schema_version": 2,
+    "dataset": "synthetic-operations@5",
+    "profile_scenario": "runtime-fake",
+    "code_version": "dev",
+    "evaluator_version": "2",
+    "captured_at_utc": "2026-10-10T00:06:01Z"
+  },
+  "projection_rules": {
+    "included": [
+      "case identity and version",
+      "hard passed flag and the existing verdict_digest",
+      "per-dimension evaluator name/version/passed/reason/evidence reference/failed assertion/failure taxonomy/human_disposition",
+      "failure records (classification only)",
+      "stable run evidence: terminal, event type sequence, projected result, fake write count, cleanup result, http statuses, retries",
+      "startup registration projection used by architecture_boundary"
+    ],
+    "excluded_volatile": [
+      "report.generated_at",
+      "case.run_id and report run identity",
+      "evidence.trace_id",
+      "evidence.elapsed_ms (its text form is normalized inside reason)",
+      "evidence.events[].event_id / run_id / trace_id (already inside verdict_digest)",
+      "evaluation envelope fields added by the schema 3 migration and any semantic field"
+    ],
+    "normalized": [
+      "results[].reason: elapsed_ms=<number> -> elapsed_ms=*"
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "boundary-approved-outreach",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "1cb259b0931844d7d10df43861cdda1d342c1af7a8de34a64b9a5908883b8587",
+      "run_terminal": "completed",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "approval_required",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "completed"
+      ],
+      "event_count": 9,
+      "result": null,
+      "fake_write_count": 1,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200,
+        200,
+        200,
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed events=9",
+          "evidence_reference": "boundary-approved-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "boundary-approved-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=1 writes=1",
+          "evidence_reference": "boundary-approved-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "boundary-approved-outreach#boundary-approved-outreach:step-1",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "boundary-cancel-outreach",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "6d8954b5f4079b207541f5c4b8dab085487b3b8a8e8f4ac2e9474419e2235ef4",
+      "run_terminal": "canceled",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "approval_required",
+        "canceled"
+      ],
+      "event_count": 5,
+      "result": null,
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200,
+        200,
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=canceled events=5",
+          "evidence_reference": "boundary-cancel-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "boundary-cancel-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=0 writes=0",
+          "evidence_reference": "boundary-cancel-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=canceled trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "boundary-cancel-outreach#boundary-cancel-outreach:step-1",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "boundary-cancel-while-executing",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "752cd3dc18342f1006da5121eed700faac2a3f03e4d1551b2683653cd4492483",
+      "run_terminal": "canceled",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "progress",
+        "tool_call",
+        "canceled"
+      ],
+      "event_count": 6,
+      "result": null,
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200,
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=canceled events=6",
+          "evidence_reference": "boundary-cancel-while-executing",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "boundary-cancel-while-executing",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=1 writes=0",
+          "evidence_reference": "boundary-cancel-while-executing",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=canceled trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "boundary-cancel-while-executing#boundary-cancel-while-executing:step-1",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "boundary-explicit-step-approval",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "4484af036903e156889840f6d5128b0529c63f83d5ce0d59de7bcdac8342e3bb",
+      "run_terminal": "completed",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "approval_required",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "completed"
+      ],
+      "event_count": 13,
+      "result": null,
+      "fake_write_count": 1,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200,
+        200,
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed events=13",
+          "evidence_reference": "boundary-explicit-step-approval",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "boundary-explicit-step-approval",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=2 writes=1",
+          "evidence_reference": "boundary-explicit-step-approval",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "boundary-explicit-step-approval#boundary-explicit-step-approval:step-2",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "boundary-mixed-plan-approval-binding",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "f466a8cf8da106c770b6576eac470c3768e98b032be1c7a0be71f4df0d5246c4",
+      "run_terminal": "completed",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "approval_required",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "completed"
+      ],
+      "event_count": 13,
+      "result": null,
+      "fake_write_count": 1,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200,
+        200,
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed events=13",
+          "evidence_reference": "boundary-mixed-plan-approval-binding",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "boundary-mixed-plan-approval-binding",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=2 writes=1",
+          "evidence_reference": "boundary-mixed-plan-approval-binding",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "boundary-mixed-plan-approval-binding#boundary-mixed-plan-approval-binding:step-2",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "diversity-audience-subject-variant",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "8688eee9307e2fd5d3e6892232aad83174a5985eb453cc3580d964d0f73c24bc",
+      "run_terminal": "completed",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "completed"
+      ],
+      "event_count": 8,
+      "result": {
+        "count": 4,
+        "customer_ids": [
+          "cust-001",
+          "cust-002",
+          "cust-006",
+          "cust-008"
+        ],
+        "spend_365d_total": 6200
+      },
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed events=8",
+          "evidence_reference": "diversity-audience-subject-variant",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "diversity-audience-subject-variant",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=1 writes=0",
+          "evidence_reference": "diversity-audience-subject-variant",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed trace=true elapsed_ms=* retries=0/1",
+          "evidence_reference": "diversity-audience-subject-variant#diversity-audience-subject-variant:step-1",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "negative-invalid-input",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "ae94cb46ae40d10b509aec510d83b587a4093fcb0d25d105e71c7dc332a6e5f6",
+      "run_terminal": "",
+      "event_types": [],
+      "event_count": 0,
+      "result": {
+        "http_status": 400
+      },
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        400
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal= events=0",
+          "evidence_reference": "negative-invalid-input",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "negative-invalid-input",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=0 writes=0",
+          "evidence_reference": "negative-invalid-input",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal= trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "negative-invalid-input",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "negative-raw-export-blocked",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "6fea31b6c7f5437a892901904a9b25d1ab224b2dc1405cbb542f8e68f5c19bfa",
+      "run_terminal": "failed",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "progress",
+        "tool_call",
+        "failed"
+      ],
+      "event_count": 6,
+      "result": null,
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=failed events=6",
+          "evidence_reference": "negative-raw-export-blocked",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "negative-raw-export-blocked",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=1 writes=0",
+          "evidence_reference": "negative-raw-export-blocked",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=failed trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "negative-raw-export-blocked#negative-raw-export-blocked:step-1",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "negative-reject-outreach",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "13e7d201d50a8112fbbd22830d9b21e5b94a9baeda8d5db614e9025a1836634f",
+      "run_terminal": "failed",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "approval_required",
+        "failed"
+      ],
+      "event_count": 5,
+      "result": null,
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200,
+        200,
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=failed events=5",
+          "evidence_reference": "negative-reject-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "negative-reject-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=0 writes=0",
+          "evidence_reference": "negative-reject-outreach",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=failed trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "negative-reject-outreach#negative-reject-outreach:step-1",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "negative-unknown-capability",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "9dbead98f7f69067e4f80e9e4fa074dc751189e7c3b004630242a4c078752938",
+      "run_terminal": "failed",
+      "event_types": [
+        "started",
+        "decision",
+        "failed"
+      ],
+      "event_count": 3,
+      "result": null,
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=failed events=3",
+          "evidence_reference": "negative-unknown-capability",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "negative-unknown-capability",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=0 writes=0",
+          "evidence_reference": "negative-unknown-capability",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=failed trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "negative-unknown-capability",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "negative-wrong-step-approval",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "8b2ebea2d5dcf8dedfa39c7f2d8e42f77693add63573ef572c0aa371365ad5c3",
+      "run_terminal": "",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "approval_required"
+      ],
+      "event_count": 8,
+      "result": null,
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200,
+        404,
+        409
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal= events=8",
+          "evidence_reference": "negative-wrong-step-approval",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "negative-wrong-step-approval",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=1 writes=0",
+          "evidence_reference": "negative-wrong-step-approval",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal= trace=true elapsed_ms=* retries=0/0",
+          "evidence_reference": "negative-wrong-step-approval#negative-wrong-step-approval:step-2",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "positive-audience-query",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "392bb15eab05563e9fc3d2344b0ccf14ada54e645ed050879b2043bc084f1ba5",
+      "run_terminal": "completed",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "completed"
+      ],
+      "event_count": 8,
+      "result": {
+        "count": 4,
+        "customer_ids": [
+          "cust-001",
+          "cust-002",
+          "cust-006",
+          "cust-008"
+        ],
+        "spend_365d_total": 6200
+      },
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed events=8",
+          "evidence_reference": "positive-audience-query",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "positive-audience-query",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=1 writes=0",
+          "evidence_reference": "positive-audience-query",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed trace=true elapsed_ms=* retries=0/1",
+          "evidence_reference": "positive-audience-query#positive-audience-query:step-1",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    },
+    {
+      "case_id": "positive-serial-summary",
+      "case_version": "1.0.0",
+      "passed": true,
+      "verdict_digest": "c25278fdc55418483f99470dc525da54d9e6bb4febfc00025ce73969ca1118c0",
+      "run_terminal": "completed",
+      "event_types": [
+        "started",
+        "decision",
+        "plan",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "progress",
+        "tool_call",
+        "progress",
+        "text",
+        "completed"
+      ],
+      "event_count": 12,
+      "result": null,
+      "fake_write_count": 0,
+      "cleanup_result": "ok",
+      "http_statuses": [
+        200
+      ],
+      "retries": 0,
+      "registered_tools": [
+        "raw_audience_export",
+        "simulated_outreach",
+        "user_query",
+        "user_summary_query"
+      ],
+      "worker_tool_allow_list": {
+        "user_analysis": [
+          "raw_audience_export",
+          "simulated_outreach",
+          "user_query"
+        ],
+        "user_summary": [
+          "user_summary_query"
+        ]
+      },
+      "dimensions": [
+        {
+          "evaluator_name": "business_correctness",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed events=12",
+          "evidence_reference": "positive-serial-summary",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "architecture_boundary",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "tool calls matched startup registration and policy evidence",
+          "evidence_reference": "positive-serial-summary",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "side_effect_safety",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "unique tool calls=2 writes=0",
+          "evidence_reference": "positive-serial-summary",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        },
+        {
+          "evaluator_name": "stability",
+          "evaluator_version": "2",
+          "passed": true,
+          "reason": "terminal=completed trace=true elapsed_ms=* retries=0/1",
+          "evidence_reference": "positive-serial-summary#positive-serial-summary:step-2",
+          "failed_assertion": "",
+          "failure_taxonomy": "",
+          "human_disposition": null
+        }
+      ],
+      "failures": []
+    }
+  ]
+}
