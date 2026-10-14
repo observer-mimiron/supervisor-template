@@ -74,7 +74,13 @@ var suspects = map[string]struct {
 
 // Triage extracts the failed assertions of a report into actionable items,
 // ordered by case then assertion so the output is stable across runs.
-func Triage(report Report) []TriageItem {
+// Triage reads a report's failures. It refuses a report envelope it does not
+// support before interpreting any field, so an unmigrated report cannot be
+// triaged as if its missing semantic object meant "nothing to report".
+func Triage(report Report) ([]TriageItem, error) {
+	if err := CheckReportSchemaSupported(report.ReportSchemaVersion); err != nil {
+		return nil, err
+	}
 	items := make([]TriageItem, 0)
 	for _, item := range report.Cases {
 		if item.Passed {
@@ -110,7 +116,7 @@ func Triage(report Report) []TriageItem {
 		}
 		return items[i].Assertion < items[j].Assertion
 	})
-	return items
+	return items, nil
 }
 
 func failureTaxonomy(item CaseReport, failure eval.FailureRecord, results map[string]Result) string {

@@ -12,14 +12,14 @@ import (
 func baselineFor(cases ...BaselineCase) Baseline {
 	return Baseline{
 		BaselineName: "synthetic-operations", DatasetName: "synthetic-operations", DatasetVersion: "1",
-		EvaluatorVersion: "2", ReportSchemaVersion: 2, ApprovedAt: time.Unix(0, 0).UTC(), Cases: cases,
+		EvaluatorVersion: "2", ReportSchemaVersion: 3, ApprovedAt: time.Unix(0, 0).UTC(), Cases: cases,
 	}
 }
 
 func requestFor(cases ...CurrentVerdict) ComparisonRequest {
 	return ComparisonRequest{
 		DatasetName: "synthetic-operations", DatasetVersion: "1",
-		EvaluatorVersion: "2", ReportSchemaVersion: 2, Cases: cases,
+		EvaluatorVersion: "2", ReportSchemaVersion: 3, Cases: cases,
 	}
 }
 
@@ -96,10 +96,10 @@ func TestBaselineRefusesIncomparableRuns(t *testing.T) {
 		request ComparisonRequest
 		want    string
 	}{
-		{name: "dataset version", request: ComparisonRequest{DatasetName: "synthetic-operations", DatasetVersion: "2", EvaluatorVersion: "2", ReportSchemaVersion: 2}, want: "does not match baseline"},
-		{name: "dataset name", request: ComparisonRequest{DatasetName: "other", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 2}, want: "does not match baseline"},
-		{name: "evaluator version", request: ComparisonRequest{DatasetName: "synthetic-operations", DatasetVersion: "1", EvaluatorVersion: "3", ReportSchemaVersion: 2}, want: "evaluator version"},
-		{name: "report schema newer", request: ComparisonRequest{DatasetName: "synthetic-operations", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 3}, want: "report_schema_version"},
+		{name: "dataset version", request: ComparisonRequest{DatasetName: "synthetic-operations", DatasetVersion: "2", EvaluatorVersion: "2", ReportSchemaVersion: 3}, want: "does not match baseline"},
+		{name: "dataset name", request: ComparisonRequest{DatasetName: "other", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 3}, want: "does not match baseline"},
+		{name: "evaluator version", request: ComparisonRequest{DatasetName: "synthetic-operations", DatasetVersion: "1", EvaluatorVersion: "3", ReportSchemaVersion: 3}, want: "evaluator version"},
+		{name: "report schema newer", request: ComparisonRequest{DatasetName: "synthetic-operations", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 4}, want: "report_schema_version"},
 		{name: "report schema older", request: ComparisonRequest{DatasetName: "synthetic-operations", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 1}, want: "older than the supported"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -116,11 +116,11 @@ func TestBaselineValidateRejectsIncompleteSnapshots(t *testing.T) {
 		baseline Baseline
 		want     string
 	}{
-		{name: "no dataset", baseline: Baseline{DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 2, Cases: []BaselineCase{{CaseID: "a"}}}, want: "dataset_name"},
-		{name: "no evaluator", baseline: Baseline{DatasetName: "d", DatasetVersion: "1", ReportSchemaVersion: 2, Cases: []BaselineCase{{CaseID: "a"}}}, want: "evaluator_version"},
+		{name: "no dataset", baseline: Baseline{DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 3, Cases: []BaselineCase{{CaseID: "a"}}}, want: "dataset_name"},
+		{name: "no evaluator", baseline: Baseline{DatasetName: "d", DatasetVersion: "1", ReportSchemaVersion: 3, Cases: []BaselineCase{{CaseID: "a"}}}, want: "evaluator_version"},
 		{name: "no schema version", baseline: Baseline{DatasetName: "d", DatasetVersion: "1", EvaluatorVersion: "2", Cases: []BaselineCase{{CaseID: "a"}}}, want: "report_schema_version"},
-		{name: "no cases", baseline: Baseline{DatasetName: "d", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 2}, want: "requires cases"},
-		{name: "duplicate case", baseline: Baseline{DatasetName: "d", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 2, Cases: []BaselineCase{{CaseID: "a"}, {CaseID: "a"}}}, want: "duplicate"},
+		{name: "no cases", baseline: Baseline{DatasetName: "d", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 3}, want: "requires cases"},
+		{name: "duplicate case", baseline: Baseline{DatasetName: "d", DatasetVersion: "1", EvaluatorVersion: "2", ReportSchemaVersion: 3, Cases: []BaselineCase{{CaseID: "a"}, {CaseID: "a"}}}, want: "duplicate"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := test.baseline.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -132,7 +132,7 @@ func TestBaselineValidateRejectsIncompleteSnapshots(t *testing.T) {
 
 // 快照必须能往返读写，并且拒绝未知字段——基线是评审过的数据，多出的字段意味着格式漂移。
 func TestBaselineSnapshotRoundTripAndUnknownFields(t *testing.T) {
-	built := NewBaseline("synthetic-operations", "synthetic-operations", "1", "2", 2, time.Unix(1_700_000_000, 0), []CurrentVerdict{
+	built := NewBaseline("synthetic-operations", "synthetic-operations", "1", "2", 3, time.Unix(1_700_000_000, 0), []CurrentVerdict{
 		{CaseID: "b", CaseVersion: "1", Passed: true},
 		{CaseID: "a", CaseVersion: "1", Passed: false},
 	})
@@ -169,7 +169,7 @@ func TestBaselineSnapshotRoundTripAndUnknownFields(t *testing.T) {
 // 基线快照必须记录逐用例的判定身份：只有 pass/fail 标签无法区分
 // "同一次测量重跑"与"换了一次测量但标签相同"。
 func TestBaselineSnapshotRecordsVerdictDigest(t *testing.T) {
-	built := NewBaseline("synthetic-operations", "synthetic-operations", "1", "2", 2, time.Unix(1_700_000_000, 0), []CurrentVerdict{
+	built := NewBaseline("synthetic-operations", "synthetic-operations", "1", "2", 3, time.Unix(1_700_000_000, 0), []CurrentVerdict{
 		{CaseID: "a", CaseVersion: "1", Passed: true, VerdictDigest: "digest-a"},
 		{CaseID: "b", CaseVersion: "1", Passed: false, VerdictDigest: "digest-b"},
 	})
@@ -239,7 +239,7 @@ func TestBaselineSameVerdictsUsesVerdictIdentity(t *testing.T) {
 			return b
 		}},
 		{name: "report schema changed", change: func(b Baseline) Baseline {
-			b.ReportSchemaVersion = 3
+			b.ReportSchemaVersion = 4
 			return b
 		}},
 		{name: "case set changed", change: func(b Baseline) Baseline {

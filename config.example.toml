@@ -37,7 +37,10 @@ sse_heartbeat = "15s"
 # 默认使用 DeepSeek；启动入口会加载同目录 .env，环境变量仍可覆盖。
 # 离线 fake smoke 必须显式使用：go run ./cmd/server/ -f ./config.example.toml -fake
 provider = "deepseek"
-name = "deepseek-chat"
+# 该账号可用模型为 deepseek-flash / deepseek-v4-pro（GET /models）。
+# 注意：请求旧的 deepseek-chat 会被静默替换为 deepseek-flash，因此这里写实际模型名，
+# 且 adapter 会校验响应体的 model 字段，替换会被 fail-closed 拒绝。
+name = "deepseek-flash"
 base_url = "https://api.deepseek.com"
 # 这里只填环境变量名，不要填 API key 本身。
 api_key_env = "LLM_API_KEY"

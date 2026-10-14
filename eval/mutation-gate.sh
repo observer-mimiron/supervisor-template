@@ -13,8 +13,9 @@
 #
 # 前置条件（脚本会自检，不满足直接以退出码 2 中止）：
 #   探针必须在干净树上**可判别**。任一列在未注入时就是 RED，它对每条注入都会报
-#   "caught"，这一列就不携带任何信息。本仓库的 Go 缓存必须落在工作区内：
-#     export GOMODCACHE="$PWD/tmp/modcache" GOCACHE="$PWD/tmp/gocache" GOSUMDB=off
+#   "caught"，这一列就不携带任何信息。Go 构建缓存必须可写且落在仓库外
+#   （只读的 /opt/gocache 会让探针在干净树上就红）：
+#     export GOCACHE=/tmp/go-build GOSUMDB=off
 #
 # 退出码：
 #   0  每一条注入都已施加、都仍可编译，且都被门禁抓到。
@@ -113,6 +114,10 @@ MUTATIONS=(
   # 动作级审批的判定注入（spec 004 SC-002）：把审批通告的绑定从"即将执行的那一步"
   # 改回计划级（固定绑 steps[0]）。这正是旧实现的行为，也是 spec §1 记录的原始症状——
   # 审批事件通告的动作与真正执行的动作不是同一个。修复后混合计划用例必须变红。
+  # 语义结论混入硬判定（spec 005 FR-004/FR-009/SC-003）：让硬通过与否直接由语义标签
+  # 决定。L1 路径用默认 -semantic-judge off，label 恒为 null，因此注入分支在验收数据集
+  # 上不可达，只有 L0 合同测试能抓住；豁免理由见 eval/coverage.json。
+  "judge-hard-verdict-isolation${SEP}eval/evaluator/evaluator.go${SEP}\t\treport.Semantic = candidate.Semantic${SEP}\t\treport.Semantic = candidate.Semantic\n\t\tif report.Semantic != nil \&\& report.Semantic.Label != nil {\n\t\t\treport.Passed = *report.Semantic.Label == semantic.LabelRelevant\n\t\t}${SEP}waived:judge-hard-verdict-isolation"
   "approval-plan-level-binding${SEP}internal/application/run/service.go${SEP}\"step_id\":     step.StepID,${SEP}\"step_id\":     plan.Steps[0].StepID,"
 )
 
@@ -138,8 +143,8 @@ if [ "$sanity_failed" != "0" ]; then
   cat <<'MSG'
 
 FAIL: 探针在干净树上就失败，这次改坏验证无法区分"门禁抓到"和"环境坏了"，因此不施加任何注入。
-      本仓库的常见原因：Go 构建缓存不在工作区内（例如只读的 /opt/gocache）。先执行：
-        export GOMODCACHE="$PWD/tmp/modcache" GOCACHE="$PWD/tmp/gocache" GOSUMDB=off
+      本仓库的常见原因：Go 构建缓存不可写（例如被挂成只读的 /opt/gocache）。先执行：
+        export GOCACHE=/tmp/go-build GOSUMDB=off
       然后重跑。探针输出尾部：
 MSG
   tail -n 4 "$work/sanity-l0.log" 2>/dev/null

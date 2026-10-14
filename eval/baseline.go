@@ -25,7 +25,12 @@ const (
 // CompatibleReportSchemaVersion is the oldest report schema a baseline
 // comparison understands. A report outside this range is refused instead of
 // being read under the wrong semantics.
-const CompatibleReportSchemaVersion = 2
+//
+// The controlled 2 -> 3 migration raised it: a schema-2 report predates the
+// independent semantic object, so a comparison across that boundary would be a
+// comparison between two different measurements. A v3 run against a v2 baseline
+// stays a setup error and writes no report.
+const CompatibleReportSchemaVersion = 3
 
 // BaselineCase is one approved per-Case verdict.
 //

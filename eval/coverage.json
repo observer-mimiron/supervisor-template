@@ -118,6 +118,14 @@
       "cases": [],
       "waived": true,
       "waiver_reason": "改坏验证 terminal-uniqueness-off（关掉 internal/infrastructure/eventbus 的终态守卫）实测只有 L0 变红：单进程验收里运行状态机自己就不会产生第二个终态（服务层在已终态计划上直接跳过），eventbus 的守卫在 L1 路径上不可达。由 internal/infrastructure/eventbus 的 TestMemoryBusAssignsSequenceAndRejectsSecondTerminal 覆盖。"
+    },
+    {
+      "id": "judge-hard-verdict-isolation",
+      "source": "FR-004/FR-009/SC-003",
+      "statement": "语义标签、执行状态与校准结论不得改变硬维度判定、基线比较或退出码；只有确定性代码决定硬结果",
+      "cases": [],
+      "waived": true,
+      "waiver_reason": "改坏验证 judge-hard-verdict-isolation 把语义标签混入硬判定（eval/evaluator/evaluator.go 的 BuildWithProfile 中 report.Passed = label==relevant），L1 验收路径不可达：cmd/eval 的 L1 运行使用默认 -semantic-judge off，所有 Case 的 semantic.label 为 null，注入分支不执行。该保护由 eval/evaluator/evaluator_test.go 的 TestSemanticResultNeverChangesHardVerdict（L0）覆盖。"
     }
   ]
 }

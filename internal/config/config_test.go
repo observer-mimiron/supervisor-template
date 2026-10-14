@@ -23,7 +23,11 @@ func TestLoadExampleConfig(t *testing.T) {
 	if _, ok := cfg.Agent.Routes["user_query"]; !ok {
 		t.Fatalf("configured routes = %#v", cfg.Agent.Routes)
 	}
-	if cfg.Model.Provider != "deepseek" || cfg.Model.Name != "deepseek-chat" || cfg.Model.BaseURL != "https://api.deepseek.com" {
+	// The example pins the model name the account actually serves. Requesting the
+	// legacy alias deepseek-chat is silently substituted by deepseek-flash, and the
+	// Judge adapter refuses a substituted model, so the registered name must be the
+	// real one.
+	if cfg.Model.Provider != "deepseek" || cfg.Model.Name != "deepseek-flash" || cfg.Model.BaseURL != "https://api.deepseek.com" {
 		t.Fatalf("example model defaults = %#v", cfg.Model)
 	}
 }

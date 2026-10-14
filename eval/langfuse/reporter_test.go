@@ -35,7 +35,7 @@ func TestUploadReportSendsTraceLinkedScores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := evaluator.Report{CodeVersion: "code-1", Cases: []evaluator.CaseReport{{
+	report := evaluator.Report{ReportSchemaVersion: evaluator.ReportSchemaVersion, CodeVersion: "code-1", Cases: []evaluator.CaseReport{{
 		CaseID: "case-1", CaseVersion: "1", Evidence: runner.Evidence{TraceID: "trace-1"},
 		Results: []evaluator.Result{{Evaluator: "business_correctness", Version: "2", Passed: true, Reason: "ok"}},
 	}}}
@@ -57,7 +57,7 @@ func TestUploadReportSkipsLocalEvidenceWithoutTrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uploaded, err := client.UploadReport(context.Background(), evaluator.Report{Cases: []evaluator.CaseReport{{
+	uploaded, err := client.UploadReport(context.Background(), evaluator.Report{ReportSchemaVersion: evaluator.ReportSchemaVersion, Cases: []evaluator.CaseReport{{
 		Evidence: runner.Evidence{}, Results: []evaluator.Result{{Evaluator: "stability", Passed: true}},
 	}}})
 	if err != nil || uploaded != 0 {
@@ -84,7 +84,7 @@ func TestUploadReportNeverForwardsEvidenceValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report := evaluator.Report{CodeVersion: "code-1", Cases: []evaluator.CaseReport{{
+	report := evaluator.Report{ReportSchemaVersion: evaluator.ReportSchemaVersion, CodeVersion: "code-1", Cases: []evaluator.CaseReport{{
 		CaseID: "case-1", CaseVersion: "1", Evidence: runner.Evidence{TraceID: "trace-1"},
 		Results: []evaluator.Result{
 			{

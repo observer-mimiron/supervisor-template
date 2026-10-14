@@ -20,7 +20,10 @@ func failingReport(taxonomy, assertion string) Report {
 }
 
 func TestTriageTurnsFailuresIntoActionableItems(t *testing.T) {
-	items := Triage(failingReport("business_expectation", "result"))
+	items, triageErr := Triage(failingReport("business_expectation", "result"))
+	if triageErr != nil {
+		t.Fatalf("triage: %v", triageErr)
+	}
 	if len(items) != 1 {
 		t.Fatalf("items=%d, want 1", len(items))
 	}
@@ -39,7 +42,11 @@ func TestTriageTurnsFailuresIntoActionableItems(t *testing.T) {
 
 func TestTriageIsEmptyForPassingReport(t *testing.T) {
 	report := Report{ReportSchemaVersion: ReportSchemaVersion, Cases: []CaseReport{{CaseID: "case-1", Passed: true}}}
-	if items := Triage(report); len(items) != 0 {
+	items, triageErr := Triage(report)
+	if triageErr != nil {
+		t.Fatalf("triage: %v", triageErr)
+	}
+	if len(items) != 0 {
 		t.Fatalf("passing report produced triage items: %#v", items)
 	}
 	if rendered := RenderTriage(nil); !strings.Contains(rendered, "无失败断言") {
@@ -49,7 +56,10 @@ func TestTriageIsEmptyForPassingReport(t *testing.T) {
 
 // 未映射的失败类别不能静默丢失：必须仍然产出条目并提示人工判断。
 func TestTriageKeepsUnknownTaxonomy(t *testing.T) {
-	items := Triage(failingReport("something_new", "terminal"))
+	items, triageErr := Triage(failingReport("something_new", "terminal"))
+	if triageErr != nil {
+		t.Fatalf("triage: %v", triageErr)
+	}
 	if len(items) != 1 || items[0].Taxonomy != "something_new" {
 		t.Fatalf("unknown taxonomy was dropped: %#v", items)
 	}
@@ -59,7 +69,11 @@ func TestTriageKeepsUnknownTaxonomy(t *testing.T) {
 }
 
 func TestRenderTriageListsNextActions(t *testing.T) {
-	rendered := RenderTriage(Triage(failingReport("implementation", "side_effect_attribution")))
+	items, triageErr := Triage(failingReport("implementation", "side_effect_attribution"))
+	if triageErr != nil {
+		t.Fatalf("triage: %v", triageErr)
+	}
+	rendered := RenderTriage(items)
 	for _, want := range []string{"| Case |", "case-1", "第一步", "收尾要求"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("rendered triage is missing %q:\n%s", want, rendered)

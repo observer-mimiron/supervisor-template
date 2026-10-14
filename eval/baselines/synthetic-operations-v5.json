@@ -3,8 +3,8 @@
   "dataset_name": "synthetic-operations",
   "dataset_version": "5",
   "evaluator_version": "2",
-  "report_schema_version": 2,
-  "approved_at": "2026-10-07T03:01:07.516954425Z",
+  "report_schema_version": 3,
+  "approved_at": "2026-10-10T00:29:46.343933673Z",
   "cases": [
     {
       "case_id": "boundary-approved-outreach",

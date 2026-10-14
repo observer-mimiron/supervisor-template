@@ -9,6 +9,7 @@ import (
 
 	eval "github.com/observer-mimiron/supervisor-template/eval"
 	"github.com/observer-mimiron/supervisor-template/eval/runner"
+	"github.com/observer-mimiron/supervisor-template/eval/semantic"
 	"github.com/observer-mimiron/supervisor-template/internal/composition"
 )
 
@@ -470,5 +471,129 @@ func TestBuildWithSelectionRejectsInvalidSelection(t *testing.T) {
 	result, ok := resultFor(report.Cases[0], "evaluator_contract")
 	if !ok || result.Passed || !strings.Contains(result.Reason, "invalid case selection") {
 		t.Fatalf("invalid selection contract=%#v", report.Cases[0])
+	}
+}
+
+// --- schema 3 and semantic isolation (005) ---------------------------------
+
+// isolationDataset mirrors the shape of an existing passing evaluator fixture:
+// the hard verdict is re-derived from Case + Evidence, so the fixture must
+// satisfy the evidence contract for the passing variant to pass.
+func isolationDataset() eval.Dataset {
+	return eval.Dataset{
+		Name: "isolation", Version: "1",
+		Cases: []eval.Case{{
+			ID: "isolation-case", Version: "1.0.0", EvaluatorRules: allEvaluatorRules(),
+			ExpectedResults:  eval.ExpectedResults{Terminal: "completed", EventTypes: []string{"started", "completed"}},
+			ForbiddenEffects: eval.ForbiddenEffects{MaxWrites: 0},
+		}},
+	}
+}
+
+func isolationEvidence(terminal string) runner.Evidence {
+	return runner.Evidence{
+		CaseID: "isolation-case", CaseVersion: "1.0.0", RunID: "isolation-case",
+		Terminal: terminal, TraceID: "trace-1", HTTPStatus: []int{200}, CleanupResult: "ok",
+		Events: []runner.Event{
+			{EventID: "e1", RunID: "isolation-case", TraceID: "trace-1", Sequence: 1, Type: "started"},
+			{EventID: "e2", RunID: "isolation-case", TraceID: "trace-1", Sequence: 2, Type: terminal},
+		},
+	}
+}
+
+func isolationReport(t *testing.T, semanticResult *semantic.Result, terminal string) Report {
+	t.Helper()
+	report := Build(isolationDataset(), "dev", []CaseReport{{
+		CaseID: "isolation-case", CaseVersion: "1.0.0", RunID: "isolation-case",
+		Evidence: isolationEvidence(terminal), Semantic: semanticResult,
+	}})
+	if len(report.Cases) != 1 {
+		t.Fatalf("expected one case, got %d", len(report.Cases))
+	}
+	return report
+}
+
+// The isolation invariant: a semantic label and status are advisory metadata and
+// never change the hard verdict, the failure list or the aggregate counts.
+func TestSemanticResultNeverChangesHardVerdict(t *testing.T) {
+	label := semantic.LabelIrrelevant
+	cases := map[string]*semantic.Result{
+		"irrelevant label": {Dimension: semantic.DimensionAnswerRelevanceValue, ExecutionStatus: semantic.ExecutionEvaluated,
+			AcceptanceStatus: semantic.AcceptanceUsable, Label: &label},
+		"unverified":       semantic.UnverifiedPointer(semantic.ReasonTimeout),
+		"missing material": semantic.UnverifiedPointer(semantic.ReasonMaterialMissing),
+		"not calibrated":   semantic.UnverifiedPointer(semantic.ReasonNotCalibrated),
+	}
+	for name, semanticResult := range cases {
+		t.Run(name, func(t *testing.T) {
+			// A hard pass stays a hard pass.
+			passing := isolationReport(t, semanticResult, "completed")
+			if !passing.Cases[0].Passed || passing.Passed != 1 || passing.Failed != 0 {
+				t.Fatalf("a semantic result changed a hard pass: passed=%t aggregate=%d/%d",
+					passing.Cases[0].Passed, passing.Passed, passing.Failed)
+			}
+			// A hard failure stays a hard failure: semantics cannot rescue it.
+			failing := isolationReport(t, semanticResult, "failed")
+			if failing.Cases[0].Passed || failing.Passed != 0 || failing.Failed != 1 {
+				t.Fatalf("a semantic result changed a hard failure: passed=%t aggregate=%d/%d",
+					failing.Cases[0].Passed, failing.Passed, failing.Failed)
+			}
+		})
+	}
+}
+
+func TestReportSchemaThreeCarriesSemanticWithoutMaterialText(t *testing.T) {
+	if ReportSchemaVersion != 3 {
+		t.Fatalf("the migration version is 3, got %d", ReportSchemaVersion)
+	}
+	label := semantic.LabelRelevant
+	semanticResult := &semantic.Result{
+		Dimension: semantic.DimensionAnswerRelevanceValue, SampleID: "sample-1",
+		MaterialDigest: "material-digest-1", ScorerDigest: "scorer-digest-1",
+		ExecutionStatus: semantic.ExecutionEvaluated, AcceptanceStatus: semantic.AcceptanceUsable, Label: &label,
+	}
+	report := isolationReport(t, semanticResult, "completed")
+	if report.Cases[0].Semantic == nil {
+		t.Fatal("the semantic object must survive report assembly")
+	}
+	if report.Cases[0].Semantic.Label == nil || *report.Cases[0].Semantic.Label != semantic.LabelRelevant {
+		t.Fatalf("the validated label must be preserved: %+v", report.Cases[0].Semantic)
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The semantic object carries identities and statuses, never the evaluated
+	// text, the raw model output or the human disposition.
+	for _, forbidden := range []string{"符合条件的合成客户", "task_intent", "public_answer", "raw_output", "human_disposition\":{"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("the report must not carry %q", forbidden)
+		}
+	}
+	if !strings.Contains(string(data), `"semantic"`) {
+		t.Fatal("the report must carry the semantic object")
+	}
+}
+
+func TestMaintainedConsumersRejectUnsupportedReportVersions(t *testing.T) {
+	if err := CheckReportSchemaSupported(ReportSchemaVersion); err != nil {
+		t.Fatalf("the current schema must be supported: %v", err)
+	}
+	for _, version := range []int{0, 1, 2, 4, 99} {
+		if err := CheckReportSchemaSupported(version); err == nil {
+			t.Fatalf("report schema %d must be refused before its fields are read", version)
+		}
+	}
+	// Triage refuses an unmigrated report instead of interpreting it.
+	if _, err := Triage(Report{ReportSchemaVersion: 2}); err == nil {
+		t.Fatal("triage must refuse a schema-2 report")
+	}
+	// The baseline comparison refuses it too.
+	baseline := eval.Baseline{
+		BaselineName: "b", DatasetName: "d", DatasetVersion: "1", EvaluatorVersion: Version,
+		ReportSchemaVersion: 2, Cases: []eval.BaselineCase{{CaseID: "c", Passed: true}},
+	}
+	if err := baseline.CheckCompatible("d", "1", Version, ReportSchemaVersion); err == nil {
+		t.Fatal("a v3 run must refuse a v2 baseline before executing any Case")
 	}
 }

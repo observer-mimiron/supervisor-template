@@ -26,6 +26,7 @@ import (
 
 	eval "github.com/observer-mimiron/supervisor-template/eval"
 	"github.com/observer-mimiron/supervisor-template/eval/runner"
+	"github.com/observer-mimiron/supervisor-template/eval/semantic"
 )
 
 const Version = "2"
@@ -33,7 +34,17 @@ const Version = "2"
 // ReportSchemaVersion identifies the shape of the report envelope. Consumers
 // that read a report (baseline comparison, publication) must refuse a version
 // they do not understand instead of interpreting it under newer semantics.
-const ReportSchemaVersion = 2
+//
+// Version 3 adds the independent `semantic` object to each Case report. The hard
+// fields — `passed`, `results`, `failures`, `human_disposition` and
+// `currentVerdicts` — keep their meaning, so a version bump is the only thing
+// that changed about them.
+const ReportSchemaVersion = 3
+
+// MinSupportedReportSchemaVersion is the oldest report envelope this package and
+// its consumers interpret. Version 2 predates the semantic object; a v2 report is
+// refused rather than read as if the missing object meant "no semantic layer".
+const MinSupportedReportSchemaVersion = 3
 
 var defaultRules = []string{"business_correctness@1", "architecture_boundary@1", "side_effect_safety@1", "stability@1"}
 
@@ -56,6 +67,10 @@ type CaseReport struct {
 	Results     []Result             `json:"results"`
 	Evidence    runner.Evidence      `json:"evidence"`
 	Failures    []eval.FailureRecord `json:"failures,omitempty"`
+	// Semantic is advisory evidence beside the hard verdict. It is nil when the
+	// semantic layer is not configured at all, and it never participates in
+	// Passed, Results, Failures or the baseline projection.
+	Semantic *semantic.Result `json:"semantic,omitempty"`
 }
 
 type Report struct {
@@ -204,6 +219,10 @@ func BuildWithProfile(dataset eval.Dataset, codeVersion string, selection eval.S
 		} else {
 			report = EvaluateWithProfile(item, candidate.Evidence, profile)
 		}
+		// The hard verdict is re-derived from immutable Case + Evidence; the
+		// advisory semantic result is not re-derivable and is carried over
+		// unchanged, so a rebuild cannot silently drop or reinterpret it.
+		report.Semantic = candidate.Semantic
 		if selectionErr != nil {
 			report = addContractFailure(report, codeVersion, "invalid case selection: "+selectionErr.Error())
 		}
@@ -281,6 +300,19 @@ func failedContractCase(caseID, caseVersion, codeVersion, reason string) CaseRep
 			FailedAssertion: result.FailedAssertion, EvidenceReference: result.EvidenceRef,
 		}},
 	}
+}
+
+// CheckReportSchemaSupported refuses a report envelope this build cannot
+// interpret. Consumers call it before reading any field, so an older or unknown
+// report cannot be silently interpreted under current semantics.
+func CheckReportSchemaSupported(version int) error {
+	if version < MinSupportedReportSchemaVersion {
+		return fmt.Errorf("report_schema_version %d is older than the supported %d", version, MinSupportedReportSchemaVersion)
+	}
+	if version > ReportSchemaVersion {
+		return fmt.Errorf("report_schema_version %d is newer than the supported %d", version, ReportSchemaVersion)
+	}
+	return nil
 }
 
 func WriteJSON(path string, report Report) error {

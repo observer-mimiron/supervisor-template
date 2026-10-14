@@ -48,6 +48,12 @@ func (c *Client) UploadReport(ctx context.Context, report evaluator.Report) (int
 	if c == nil {
 		return 0, fmt.Errorf("Langfuse client 未装配")
 	}
+	// The sink is a maintained consumer: it refuses an unsupported envelope
+	// before reading any field, and it keeps uploading only the existing closed
+	// hard-score projection. No semantic material is ever sent.
+	if err := evaluator.CheckReportSchemaSupported(report.ReportSchemaVersion); err != nil {
+		return 0, fmt.Errorf("langfuse 拒绝不支持的报告版本: %w", err)
+	}
 	uploaded := 0
 	for _, item := range report.Cases {
 		traceID := item.Evidence.TraceID
